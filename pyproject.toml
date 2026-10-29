@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gradehelper"
+version = "0.1.0"
+description = "课程报告自动化评分系统（docling 解析 + 规则引擎 + LLM 评估）"
+requires-python = ">=3.10"
+dependencies = [
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "PyYAML>=6.0",
+    "requests>=2.31",
+    "docling>=2.0",
+]
+
+[project.scripts]
+gradehelper = "gradehelper.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["gradehelper*"]

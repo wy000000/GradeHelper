@@ -1,0 +1,51 @@
+# 评分系统配置文件（端点、路径、Prompt 均在此外置配置）
+
+endpoints:
+  # 通用 LLM 评分端点（OpenAI 兼容接口；不限定本地或 llama 实现）
+  llm:
+    base_url: "http://localhost:8080/"
+    model: "qwen35-thinking-general"
+    temperature: 0.2
+    max_tokens: 4096
+    timeout: 600
+    max_retries: 2
+  # 图片批量识别端点（多模态，含 mmproj）；默认与 llm 相同，可各自独立覆盖
+  vllm:
+    base_url: "http://localhost:8080/"
+    model: "qwen35-thinking-general"
+    temperature: 0.1
+    max_tokens: 1024
+    timeout: 600
+    max_retries: 2
+    batch_size: 8        # 并发识别图片数
+
+paths:
+  reports_dir: "./reports"                        # 报告所在目录
+  template: "云安全-课程报告-评分模板.xlsx"        # rule 表来源 & result 表写入目标（同一文件）
+  output: ""                                      # 结果输出 xlsx；留空表示直接写回 template 文件
+  captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
+  save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）
+
+prompts:
+  # LLM 评分项通用 Prompt，占位符：{key} {evaluation} {score_range}
+  llm_item: |
+    你是一份课程报告的评审助教。请严格按照给定的评分标准，对下述评分项进行评分。
+
+    评分项编号：{key}
+    评分标准：{evaluation}
+    分数范围：{score_range}
+
+    报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：
+    ---
+    {report}
+    ---
+
+    要求：
+    1. 评语用中文，简要说明给分理由（依据评分标准逐点说明）。
+    2. 如果评分标准中规定了超出上限的额外加分情形（如亲身体会、亲身经历），按标准执行。
+    3. confidence 表示你对本次评分的置信度，取值 0~1（1 表示非常确定）。
+    4. 只输出一个 JSON 对象，不要输出任何其他内容，格式：
+       {{"score": <数字>, "confidence": <0~1的数字>, "comment": "<评语>"}}
+  # 图片描述嵌入 MD 时的引导语
+  image_context: |
+    [图片描述 P{n}: {caption}]
