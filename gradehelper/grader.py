@@ -24,7 +24,7 @@ class Grader:
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, skip_llm: bool = False,
-            skip_vllm: bool = False) -> Path:
+            skip_vllm: bool = False, skip_images: int = 2) -> Path:
         cfg = self.config
         reports_dir = reports_dir or cfg.paths.reports_dir
         template = template or cfg.paths.template
@@ -35,10 +35,17 @@ class Grader:
         reports = parse_all(reports_dir)
         if not reports:
             raise RuntimeError(f"目录中没有符合命名格式的报告: {reports_dir}")
+
+        # 跳过前面 skip_images 张图片，并重新编号
         for report in reports:
-            logger.info("  已解析 %s（图片 %d 张）", report.base_name, len(report.images))
-        if cfg.paths.save_parsed:
-            self._save_parsed(reports)
+            before = len(report.images)
+            report.images = report.images[skip_images:]
+            for new_idx, img in enumerate(report.images, 1):
+                img.index = new_idx
+            logger.info("  已解析 %s（图片 %d 张，跳过前 %d 张，剩余 %d 张）",
+                        report.base_name, before, skip_images, len(report.images))
+        # 始终保存解析产物（md 与图片）到与原文件相同路径
+        self._save_parsed(reports)
 
         # 2. 读取评分要求（rule 表）
         logger.info("【步骤 2/5】读取评分模板 rule 表: %s", template)
@@ -69,9 +76,11 @@ class Grader:
         else:
             logger.info("【步骤 5/5】LLM 评分项评估（逐文件 %d 项）", len(llm_rules))
             client = LLMClient(cfg.llm)
-            for report in reports:
+            total = len(reports)
+            for idx, report in enumerate(reports, 1):
                 for rule in llm_rules:
                     scores[report.student_id][rule.key] = self._grade_with_llm(client, report, rule)
+                logger.info("【步骤 5/5】%d/%d, ID %s：", idx, total, report.student_id)
 
         # 6. 汇总写入 result 表（总分列使用 Excel 公式）
         out = write_results(template, output, reports, rule_items, scores)
@@ -109,7 +118,7 @@ class Grader:
 
     @staticmethod
     def _save_parsed(reports: list[ParsedReport]) -> None:
-        """把解析出的 md 与图片落盘到与原文件相同路径（配置开关，默认关闭）。"""
+        """把解析出的 md 与图片落盘到与原文件相同路径。"""
         for report in reports:
             target_dir = Path(report.source_path).parent
             (target_dir / f"{report.base_name}.md").write_text(report.md_text, encoding="utf-8")

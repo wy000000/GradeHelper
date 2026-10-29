@@ -8,8 +8,9 @@ endpoints:
     api_key: ""            # OpenAI 兼容鉴权密钥；本地无鉴权时留空
     temperature: 0.2
     #max_tokens: 4096
-    timeout: 120
-    max_retries: 4       # LLM 端点的失败重试次数配置。
+    connect_timeout: 10    # TCP/TLS 连接超时（秒）
+    read_timeout: 300     # 等待响应数据的超时（秒）
+    max_retries: 3       # LLM 端点的失败重试次数配置。
   # 图片批量识别端点（多模态，含 mmproj）；默认与 llm 相同，可各自独立覆盖
   vllm:
     base_url: "http://localhost:8080/"
@@ -17,12 +18,13 @@ endpoints:
     api_key: ""            # OpenAI 兼容鉴权密钥；本地无鉴权时留空
     temperature: 0.1
     #max_tokens: 1024
-    timeout: 120
-    max_retries: 4       # VLLM 端点的失败重试次数配置。
+    connect_timeout: 10    # TCP/TLS 连接超时（秒）
+    read_timeout: 300     # 等待响应数据的超时（秒）
+    max_retries: 3       # VLLM 端点的失败重试次数配置。
     batch_size: 8        # 并发识别图片数
 
 paths:
-  reports_dir: "./reports"                        # 报告所在目录
+  reports_dir: "D:/AI/Reports/"                        # 报告所在目录
   template: "云安全-课程报告-评分模板.xlsx"        # rule 表来源 & result 表写入目标（同一文件）
   output: ""                                      # 结果输出 xlsx；留空表示直接写回 template 文件
   captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
@@ -31,7 +33,8 @@ paths:
 prompts:
   # LLM 评分项通用 Prompt，占位符：{key} {evaluation} {score_range}
   llm_item: |
-    你是一份课程报告的评审助教。请严格按照给定的评分标准，对下述评分项进行评分。
+    你是一位严格且谨慎的课程评审助教。请严格按照给定的评分标准，对下述评分项进行评分。
+    对于0-100分的评分项，请谨慎给出高于90分的评分，只有非常完美的内容，才能给出高于90分的评分。
 
     评分项编号：{key}
     评分标准：{evaluation}

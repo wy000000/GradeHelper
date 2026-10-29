@@ -40,7 +40,10 @@ class LLMClient:
         last_exc: Exception | None = None
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=self.cfg.timeout)
+                resp = requests.post(
+                    url, json=payload, headers=headers,
+                    timeout=(self.cfg.connect_timeout, self.cfg.read_timeout),
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"].get("content") or ""

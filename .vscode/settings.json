@@ -1,0 +1,8 @@
+{
+    "python.defaultInterpreterPath": "C:/Users/xablockchain/AppData/Local/Programs/Python/Python313/python.exe",
+    "python.terminal.executeInFileDir": false,
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportUnusedImport": "information",
+        "reportUnusedVariable": "information"
+    }
+}

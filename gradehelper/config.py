@@ -30,7 +30,8 @@ class EndpointConfig:
     api_key: str = ""
     temperature: float = 0.2
     max_tokens: int = 4096
-    timeout: int = 600
+    connect_timeout: int = 5      # TCP/TLS 连接超时（秒）
+    read_timeout: int = 600       # 等待响应数据的超时（秒）
     max_retries: int = 2
     batch_size: int = 8
 

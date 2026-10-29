@@ -59,7 +59,7 @@ def write_results(template_path: str | Path, output_path: str | Path,
     """把评分结果写入（同一文件的）result 表。
 
     列布局：学号 | 姓名 | 班级 | 总分 | (每项: <key>评分 [<key>置信度 仅LLM] <key>评语)
-    总分列使用 Excel 公式 =SUM(各评分列)。scores 结构：学号 -> 评分项 -> ItemScore。
+    总分列使用 Excel 公式 =分项1*权重1+分项2*权重2+...（加权求和）。scores 结构：学号 -> 评分项 -> ItemScore。
     """
     wb = load_workbook(template_path, data_only=False)
     ws = wb[RESULT_SHEET] if RESULT_SHEET in wb.sheetnames else wb.create_sheet(RESULT_SHEET)
@@ -83,8 +83,9 @@ def write_results(template_path: str | Path, output_path: str | Path,
     # 数据行
     for row_idx, report in enumerate(reports, start=2):
         row_scores = scores.get(report.student_id, {})
-        # 总分公式：只汇总各评分项列
-        formula = "=SUM(" + ",".join(f"{get_column_letter(c)}{row_idx}" for c in score_columns) + ")"
+        # 总分公式：各评分项 * 对应权重的加权求和
+        terms = [f"{get_column_letter(c)}{row_idx}*{rule.weight}" for c, rule in zip(score_columns, rules)]
+        formula = "=" + "+".join(terms)
         cells: list = [report.student_id, report.name, report.klass, formula]
         for rule in rules:
             item = row_scores.get(rule.key)

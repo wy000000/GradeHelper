@@ -29,17 +29,21 @@ python -m gradehelper --reports D:\path\to\reports --template 云安全-课程�
 
 # 只跑程序化规则（不调用任何模型端点）
 python -m gradehelper --reports ... --skip-llm --skip-vllm
+
+# 跳过每份报告的前 N 张图片（默认 2）
+python -m gradehelper --reports ... --skip-images 5
 ```
 
 - 报告文件名格式：`课程名称-专业班级-学号-姓名.docx`（其他文件自动忽略）
-- 评分要求来自模板 xlsx 的 `rule` 表；结果写入同一文件的 `result` 表（总分列为 Excel 公式 `=SUM(...)`；`置信度` 列仅 LLM 项写入）
-- 图片描述另存为 `课程名称-专业班级-学号-姓名-Pn.txt`，并嵌入内存中的 Markdown 供 LLM 评估
+- 评分要求来自模板 xlsx 的 `rule` 表；结果写入同一文件的 `result` 表（总分列为 Excel 加权公式 `=分项1*权重1+分项2*权重2+...`；`置信度` 列仅 LLM 项写入）
+- 图片描述另存为 `课程名称-专业班级-学号-姓名-Pn.txt`，并嵌入内存中的 Markdown 供 LLM 评估；解析出的 md 与图片始终保存到与原报告相同目录
+- `--skip-images N`：解析时跳过每份报告的前 N 张图片，剩余图片重新编号后参与后续识别与评分（默认 2）
 
 ## 配置（config.yaml）
 
 - `endpoints.llm` / `endpoints.vllm`：两个独立的 OpenAI 兼容端点（默认均为 `http://localhost:8080/` + `qwen35-thinking-general`，可各自覆盖）。llm用于文字评分，vllm用于图片识别。
 - `prompts.llm_item`：LLM 评分项通用 Prompt；`prompts.image_context`：图片描述嵌入模板
-- `paths.save_parsed`：是否把解析出的 md/图片落盘（默认仅驻留内存）
+- `paths.save_parsed`：已废弃，解析出的 md/图片始终保存到与原报告相同目录
 
 ## 灵活性
 
