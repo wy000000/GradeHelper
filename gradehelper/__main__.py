@@ -33,7 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-llm", action="store_true", help="跳过 LLM 评分项（只跑程序化规则）")
     parser.add_argument("--skip-vllm", action="store_true", help="跳过图片识别预处理")
     parser.add_argument("-v", "--verbose", action="store_true", help="调试日志")
-    parser.add_argument("--skip-images", type=int, default=2, help="解析时跳过前面 N 张图片（默认 2）")
+    parser.add_argument("--skip-images", type=int, default=1, help="解析时跳过前面 N 张图片（默认 1）")
+    # stage = "doc"
+    # stage = "pic"
+    # stage = "sen"
+    stage = "full"
+    parser.add_argument("--stage", choices=["doc", "pic", "sen", "full"], default=stage,
+                        help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，sen=llm语义评分，full=全部（默认）")
     return parser
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
             reports_dir=args.reports,
             template=args.template,
             output=args.output,
+            stage=args.stage,
             skip_llm=args.skip_llm,
             skip_vllm=args.skip_vllm,
             skip_images=args.skip_images,
@@ -57,7 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 CLI 顶层统一报错
         logging.error("评分失败: %s", exc)
         return 1
-    print(f"评分完成，结果已写入: {output}")
+    if output is not None:
+        print(f"评分完成，结果已写入: {output}")
+    else:
+        print(f"阶段 [{args.stage}] 执行完成")
     return 0
 
 

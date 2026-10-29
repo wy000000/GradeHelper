@@ -53,6 +53,51 @@ def read_rules(template_path: str | Path) -> list[RuleItem]:
     return rules
 
 
+def read_result_scores(template_path: str | Path,
+                       rule_keys: list[str] | None = None) -> dict[str, dict[str, float]]:
+    """读取 result 表中已写入的评分。
+
+    返回 {学号: {规则key: 分数}}。用于 sen 阶段读取 doc 阶段已写入的程序化规则分数。
+    """
+    wb = load_workbook(template_path, data_only=True)
+    if RESULT_SHEET not in wb.sheetnames:
+        return {}
+    ws = wb[RESULT_SHEET]
+
+    header = [cell.value for cell in ws[1]]
+    try:
+        sid_col = header.index("学号") + 1
+    except ValueError:
+        return {}
+
+    # 定位各规则分数列（<key>评分）
+    score_cols: dict[str, int] = {}
+    for idx, h in enumerate(header, start=1):
+        if h is None:
+            continue
+        h = str(h)
+        if h.endswith("评分"):
+            key = h[:-2]
+            if rule_keys is None or key in rule_keys:
+                score_cols[key] = idx
+
+    result: dict[str, dict[str, float]] = {}
+    for row in range(2, ws.max_row + 1):
+        sid = ws.cell(row=row, column=sid_col).value
+        if sid is None:
+            continue
+        sid_str = str(sid).strip()
+        row_scores: dict[str, float] = {}
+        for key, col in score_cols.items():
+            val = ws.cell(row=row, column=col).value
+            try:
+                row_scores[key] = float(val) if val is not None else 0.0
+            except (TypeError, ValueError):
+                row_scores[key] = 0.0
+        result[sid_str] = row_scores
+    return result
+
+
 def write_results(template_path: str | Path, output_path: str | Path,
                   reports: list[ParsedReport], rules: list[RuleItem],
                   scores: dict[str, dict[str, ItemScore]]) -> Path:
