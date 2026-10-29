@@ -27,6 +27,7 @@ class EndpointConfig:
 
     base_url: str = "http://localhost:8080/"
     model: str = "qwen35-thinking-general"
+    api_key: str = ""
     temperature: float = 0.2
     max_tokens: int = 4096
     timeout: int = 600

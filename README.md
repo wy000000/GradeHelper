@@ -4,7 +4,7 @@
 
 本系统设计易于扩展，可较容易地适配到各种课程的报告、试题、作业、试卷等材料的评阅。
 
-评阅项与评阅规则完全依赖于 `评分模板.xlsx`（`rule` 表决定评分项、权重、处理方法与评估标准；`result` 表写入评分结果）。--不同课程不同报告使用不同要求的评分模板。--
+评阅项与评阅规则完全依赖于 `评分模板.xlsx`（`rule` 表决定评分项、权重、处理方法与评估标准；`result` 表写入评分结果）。**不同课程不同任务使用不同要求的评分模板**。
 
 AI server API端点、路径及 Prompt 等均可在 `config.yaml` 中配置。
 
@@ -37,7 +37,7 @@ python -m gradehelper --reports ... --skip-llm --skip-vllm
 
 ## 配置（config.yaml）
 
-- `endpoints.llm` / `endpoints.vllm`：两个独立的 OpenAI 兼容端点（默认均为 `http://localhost:8080/` + `qwen35-thinking-general`，可各自覆盖）
+- `endpoints.llm` / `endpoints.vllm`：两个独立的 OpenAI 兼容端点（默认均为 `http://localhost:8080/` + `qwen35-thinking-general`，可各自覆盖）。llm用于文字评分，vllm用于图片识别。
 - `prompts.llm_item`：LLM 评分项通用 Prompt；`prompts.image_context`：图片描述嵌入模板
 - `paths.save_parsed`：是否把解析出的 md/图片落盘（默认仅驻留内存）
 
@@ -53,3 +53,13 @@ python -m gradehelper --reports ... --skip-llm --skip-vllm
 ```powershell
 python -m unittest discover tests -v
 ```
+
+## 许可与使用限制
+
+本项目（GradeHelper）仅供**学术研究与教学辅助**用途使用。
+
+- **允许**：个人学习、学术研究、教学评阅辅助、非商业性质的内部使用。
+- **禁止**：未经授权的任何形式的**商业使用**，包括但不限于将本项目或其衍生作品用于出售、出租、有偿服务、商业化产品或服务等以谋取经济利益为目的的行为。
+- 如需商用，请联系项目作者获取书面授权。
+
+本项目按"原样"提供，作者不对使用本项目造成的任何直接或间接损失承担责任。

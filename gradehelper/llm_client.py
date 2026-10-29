@@ -34,10 +34,13 @@ class LLMClient:
             **overrides,
         }
         url = f"{self.base_url}/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if self.cfg.api_key:
+            headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         last_exc: Exception | None = None
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = requests.post(url, json=payload, timeout=self.cfg.timeout)
+                resp = requests.post(url, json=payload, headers=headers, timeout=self.cfg.timeout)
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"].get("content") or ""
