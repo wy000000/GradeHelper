@@ -14,16 +14,43 @@ from gradehelper.parser import embed_captions  # noqa: E402
 
 
 class TestEmbedCaptions(unittest.TestCase):
+    TEMPLATE = "[图片描述 P{n}: {caption}]"
+
     def test_embed(self):
         report = ParsedReport("云安全", "安全2401", "2024001", "张三", "d.docx",
                               "开头\n[[PIC:P1]]\n结尾")
         report.images = [ReportImage(index=1, ext="png", data=b"", caption="一张网络拓扑图")]
-        md = embed_captions(report.md_text, report.images, "[图片描述 P{n}: {caption}]")
+        md = embed_captions(report.md_text, report.images, self.TEMPLATE)
         self.assertIn("[图片描述 P1: 一张网络拓扑图]", md)
-        self.assertNotIn("[[PIC:P1]]", md)
+        self.assertIn("[[PIC:P1]]", md)
 
-    def test_cleanup_placeholder(self):
-        self.assertNotIn("[[PIC:P9]]", embed_captions("[[PIC:P9]]", [], "[图片描述 P{n}: {caption}]"))
+    def test_placeholder_kept_when_no_caption(self):
+        md = embed_captions("[[PIC:P9]]", [], self.TEMPLATE)
+        self.assertIn("[[PIC:P9]]", md)
+
+    def test_repeated_run_updates_caption(self):
+        images = [ReportImage(index=1, ext="png", data=b"", caption="旧描述")]
+        md1 = embed_captions("开头\n[[PIC:P1]]\n结尾", images, self.TEMPLATE)
+        self.assertIn("[图片描述 P1: 旧描述]", md1)
+        self.assertIn("[[PIC:P1]]", md1)
+
+        images[0].caption = "新描述"
+        md2 = embed_captions(md1, images, self.TEMPLATE)
+        self.assertIn("[图片描述 P1: 新描述]", md2)
+        self.assertNotIn("[图片描述 P1: 旧描述]", md2)
+        self.assertIn("[[PIC:P1]]", md2)
+
+    def test_caption_with_brackets(self):
+        images = [ReportImage(index=1, ext="png", data=b"",
+                              caption="图中有[a]和[b]两个标记")]
+        md1 = embed_captions("开头\n[[PIC:P1]]\n结尾", images, self.TEMPLATE)
+        self.assertIn("[图片描述 P1: 图中有[a]和[b]两个标记]", md1)
+
+        images[0].caption = "更新后的描述"
+        md2 = embed_captions(md1, images, self.TEMPLATE)
+        self.assertIn("[图片描述 P1: 更新后的描述]", md2)
+        self.assertNotIn("图中有[a]和[b]两个标记", md2)
+        self.assertIn("[[PIC:P1]]", md2)
 
 
 class TestParseJsonObject(unittest.TestCase):

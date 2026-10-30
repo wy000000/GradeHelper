@@ -343,13 +343,51 @@ def parse_all(reports_dir: str | Path) -> list[ParsedReport]:
     return reports
 
 
+def _caption_block_span(md: str, template: str, index: int) -> tuple[int, int] | None:
+    """定位 md 中某张图片旧描述块的 (起始, 结束) 字节偏移。
+
+    描述块由 image_context 模板生成，形如 "[图片描述 P{n}: {caption}]"。
+    采用括号计数法定位与开头 '[' 配对的闭合 ']'，因此 caption 中即便
+    含有 '[' 或 ']' 也能正确匹配整块。末尾的可选换行一并计入结束偏移，
+    以便重复运行时用新描述块原位替换旧块。
+    """
+    prefix = template.split("{caption}", 1)[0].format(n=index)
+    start = md.find(prefix)
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(md)):
+        ch = md[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                if end < len(md) and md[end] == "\n":
+                    end += 1
+                return start, end
+    return None
+
+
 def embed_captions(md_text: str, images: list[ReportImage], template: str) -> str:
-    """把图片描述嵌入 md 中对应占位符位置。"""
+    """把图片描述嵌入 md 中对应占位符位置。
+
+    - 占位符 [[PIC:Pn]] 始终保留（不消耗），描述块放在占位符之后；
+    - 首次运行：在 [[PIC:Pn]] 后追加描述块；
+    - 重复运行：若已存在旧描述块则原位替换为新描述；
+    - 不再清除未替换的占位符，以便 pic 阶段可重复执行。
+    """
     result = md_text
     for img in images:
         if not img.caption:
             continue
         block = template.format(n=img.index, caption=img.caption.strip())
-        result = result.replace(f"[[PIC:P{img.index}]]", block, 1)
-    result = PIC_PATTERN.sub("", result)  # 清理未替换的占位符
+        placeholder = f"[[PIC:P{img.index}]]"
+        span = _caption_block_span(result, template, img.index)
+        if span is not None:
+            start, end = span
+            result = result[:start] + block + result[end:]
+        elif placeholder in result:
+            result = result.replace(placeholder, placeholder + block, 1)
     return re.sub(r"\n{3,}", "\n\n", result).strip() + "\n"

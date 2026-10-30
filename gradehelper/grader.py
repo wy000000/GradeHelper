@@ -72,7 +72,7 @@ class Grader:
     # ------------------------------------------------------------------ 阶段 2：pic（vllm 图片识别 + 更新 md）
 
     def stage_pic(self, reports_dir: str | Path, template: str | Path,
-                  skip_vllm: bool = False, skip_images: int = 2) -> None:
+                  skip_images: int = 2) -> None:
         """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。"""
         cfg = self.config
         reports_dir = Path(reports_dir)
@@ -84,11 +84,9 @@ class Grader:
             raise RuntimeError(f"目录中没有找到已保存的 md 文件: {reports_dir}")
 
         llm_rules_flag = any(r.is_llm for r in read_rules(template))
-        if skip_vllm:
-            logger.info("【阶段 pic】跳过 vllm 图片识别（--skip-vllm）")
-        elif llm_rules_flag:
+        if llm_rules_flag:
             logger.info("【阶段 pic】vllm 批量识别图片")
-            caption_images(reports, cfg.vllm)
+            caption_images(reports, cfg.vllm, cfg.prompts.image_prompt)
             saved = save_captions_txt(reports, cfg.paths.captions_dir or None)
             logger.info("  图片描述已另存 %d 个 txt", saved)
         for report in reports:
@@ -103,8 +101,7 @@ class Grader:
     # ------------------------------------------------------------------ 阶段 3：sen（llm 语义评分 + 更新 result 表）
 
     def stage_sen(self, reports_dir: str | Path, template: str | Path,
-                  output: str | Path, skip_llm: bool = False,
-                  skip_images: int = 2) -> Path:
+                  output: str | Path, skip_images: int = 2) -> Path:
         """阶段 sen：llm 语义评分，读取 doc 阶段已写入的程序化分数，写入最终 result 表。"""
         cfg = self.config
         reports_dir = Path(reports_dir)
@@ -118,8 +115,8 @@ class Grader:
         # 从磁盘读取已更新的 md（pic 阶段保存的）
         reports = self._load_reports_for_pic(reports_dir, skip_images)
 
-        if skip_llm or not llm_rule_keys:
-            logger.info("【阶段 sen】跳过 LLM 评分项")
+        if not llm_rule_keys:
+            logger.info("【阶段 sen】无 LLM 评分项，沿用已有分数")
             final_scores: dict[str, dict[str, ItemScore]] = {}
             for report in reports:
                 sid = report.student_id
@@ -159,7 +156,6 @@ class Grader:
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, stage: str = "full",
-            skip_llm: bool = False, skip_vllm: bool = False,
             skip_images: int = 2) -> Path | None:
         cfg = self.config
         reports_dir = reports_dir or cfg.paths.reports_dir
@@ -168,19 +164,19 @@ class Grader:
 
         if stage == "full":
             self.stage_doc(reports_dir, template, skip_images)
-            self.stage_pic(reports_dir, template, skip_vllm, skip_images)
-            return self.stage_sen(reports_dir, template, output, skip_llm, skip_images)
+            self.stage_pic(reports_dir, template, skip_images)
+            return self.stage_sen(reports_dir, template, output, skip_images)
 
         if stage == "doc":
             self.stage_doc(reports_dir, template, skip_images)
             return None
 
         if stage == "pic":
-            self.stage_pic(reports_dir, template, skip_vllm, skip_images)
+            self.stage_pic(reports_dir, template, skip_images)
             return None
 
         if stage == "sen":
-            return self.stage_sen(reports_dir, template, output, skip_llm, skip_images)
+            return self.stage_sen(reports_dir, template, output, skip_images)
 
         raise ValueError(f"未知的 stage 参数: {stage}")
 

@@ -40,9 +40,6 @@ python -m gradehelper --stage sen --reports D:\\path\\to\\reports --template 云
 
 # 跳过每份报告的前 N 张图片（默认 2）
 python -m gradehelper --reports ... --skip-images 5
-
-# 只跑程序化规则（不调用任何模型端点）
-python -m gradehelper --reports ... --skip-llm --skip-vllm
 ```
 
 - 报告文件名格式：`课程名称-专业班级-学号-姓名.docx`（其他文件自动忽略）
@@ -70,12 +67,3 @@ python -m gradehelper --reports ... --skip-llm --skip-vllm
 python -m unittest discover tests -v
 ```
 
-## 许可与使用限制
-
-本项目（GradeHelper）仅供**学术研究与教学辅助**用途使用。
-
-- **允许**：个人学习、学术研究、教学评阅辅助、非商业性质的内部使用。
-- **禁止**：未经授权的任何形式的**商业使用**，包括但不限于将本项目或其衍生作品用于出售、出租、有偿服务、商业化产品或服务等以谋取经济利益为目的的行为。
-- 如需商用，请联系项目作者获取书面授权。
-
-本项目按"原样"提供，作者不对使用本项目造成的任何直接或间接损失承担责任。

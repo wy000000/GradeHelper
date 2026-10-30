@@ -30,10 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reports", default=None, help="报告目录（覆盖配置）")
     parser.add_argument("--template", default=None, help="评分模板 xlsx（rule 表来源与结果写入目标）")
     parser.add_argument("--output", default=None, help="结果输出 xlsx；默认写回模板文件")
-    parser.add_argument("--skip-llm", action="store_true", help="跳过 LLM 评分项（只跑程序化规则）")
-    parser.add_argument("--skip-vllm", action="store_true", help="跳过图片识别预处理")
     parser.add_argument("-v", "--verbose", action="store_true", help="调试日志")
-    parser.add_argument("--skip-images", type=int, default=1, help="解析时跳过前面 N 张图片（默认 1）")
+    parser.add_argument("--skip-images", type=int, default=0, help="解析时跳过前面 N 张图片（默认 1）")
     # stage = "doc"
     # stage = "pic"
     stage = "sen"
@@ -57,8 +55,6 @@ def main(argv: list[str] | None = None) -> int:
             template=args.template,
             output=args.output,
             stage=args.stage,
-            skip_llm=args.skip_llm,
-            skip_vllm=args.skip_vllm,
             skip_images=args.skip_images,
         )
     except Exception as exc:  # noqa: BLE001 CLI 顶层统一报错

@@ -12,16 +12,12 @@ from .models import ParsedReport, ReportImage
 
 logger = logging.getLogger(__name__)
 
-CAPTION_PROMPT = (
-    "请详细描述这张课程报告插图的内容：图的类型（拓扑图/截图/表格/流程图/示意图等）、"
-    "核心元素与文字标注、技术上的合理性线索。只输出描述文字，不要任何前缀。"
-)
 
-
-def caption_images(reports: list[ParsedReport], cfg: EndpointConfig) -> int:
+def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_prompt: str) -> int:
     """对所有报告的所有图片并发批量识别，结果写入 ReportImage.caption。
 
     返回成功识别的图片数量。图片内容与正文的相关性、合理性判定交给后续 LLM 评分项。
+    image_prompt 会原样作为文本消息提交给 /chat/completions API。
     """
     client = LLMClient(cfg)
     tasks: list[tuple[ParsedReport, ReportImage]] = [
@@ -35,7 +31,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig) -> int:
     done = 0
 
     def _describe(report: ParsedReport, image: ReportImage) -> tuple[str, int, str]:
-        return report.student_id, image.index, client.describe_image(image.data, image.ext, CAPTION_PROMPT)
+        return report.student_id, image.index, client.describe_image(image.data, image.ext, image_prompt)
 
     with ThreadPoolExecutor(max_workers=max(1, cfg.batch_size)) as pool:
         futures = {pool.submit(_describe, r, i): (r, i) for r, i in tasks}

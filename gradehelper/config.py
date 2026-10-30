@@ -72,6 +72,10 @@ class PathsConfig:
 class PromptsConfig:
     llm_item: str = DEFAULT_LLM_ITEM_PROMPT
     image_context: str = "[图片描述 P{n}: {caption}]"
+    image_prompt: str = (
+        "请详细描述这张课程报告插图的内容：图的类型（拓扑图/截图/表格/流程图/示意图等）、"
+        "核心元素与文字标注、技术上的合理性线索。只输出描述文字，不要任何前缀。"
+    )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PromptsConfig":
