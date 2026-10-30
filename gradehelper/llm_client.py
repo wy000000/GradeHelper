@@ -25,14 +25,13 @@ class LLMClient:
 
     def chat(self, messages: list[dict], **overrides) -> str:
         """同步请求 chat completions，带简单重试；返回 content 文本。"""
-        payload = {
-            "model": overrides.pop("model", self.cfg.model),
-            "messages": messages,
-            "temperature": overrides.pop("temperature", self.cfg.temperature),
-            "max_tokens": overrides.pop("max_tokens", self.cfg.max_tokens),
-            "stream": False,
-            **overrides,
-        }
+        cfg = self.cfg
+        # YAML api 子区域中的所有参数自动透传；overrides 可覆盖或追加
+        payload: dict = dict(cfg.api_params)
+        payload["messages"] = messages
+        payload["stream"] = False
+        payload["model"] = overrides.pop("model", cfg.get_api_param("model"))
+        payload.update(overrides)
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:

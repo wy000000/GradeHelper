@@ -31,7 +31,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig) -> int:
         return 0
 
     logger.info("开始 vllm 图片识别：%d 张，端点 %s，模型 %s，并发 %d",
-                len(tasks), cfg.base_url, cfg.model, cfg.batch_size)
+                len(tasks), cfg.base_url, cfg.get_api_param("model"), cfg.batch_size)
     done = 0
 
     def _describe(report: ParsedReport, image: ReportImage) -> tuple[str, int, str]:

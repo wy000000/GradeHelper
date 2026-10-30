@@ -25,23 +25,38 @@ DEFAULT_LLM_ITEM_PROMPT = (
 class EndpointConfig:
     """OpenAI 兼容端点配置（llm 与 vllm 均使用此结构，默认值可相同）。"""
 
+    # ---- 客户端专用（来自 YAML 的 client 子区域，不会发送给 API）----
     base_url: str = "http://localhost:8080/"
-    model: str = "qwen35-thinking-general"
     api_key: str = ""
-    temperature: float = 0.2
-    max_tokens: int = 4096
     connect_timeout: int = 5      # TCP/TLS 连接超时（秒）
     read_timeout: int = 600       # 等待响应数据的超时（秒）
     max_retries: int = 2
     batch_size: int = 8
 
+    # ---- API 参数（来自 YAML 的 api 子区域，全部透传给 /chat/completions）----
+    # api 子区域中出现的所有键值对原样存入此字典；新增任意键自动生效，无需改代码
+    api_params: dict[str, Any] = field(default_factory=dict, repr=False)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "EndpointConfig":
         cfg = cls()
-        for key, value in (data or {}).items():
+        data = data or {}
+        # client 子区域：解析为 dataclass 字段
+        client_data = data.get("client") or {}
+        for key, value in client_data.items():
+            if key.startswith("_"):
+                continue
             if hasattr(cfg, key):
                 setattr(cfg, key, value)
+        # api 子区域：全部原样存入 api_params，自动透传
+        api_data = data.get("api") or {}
+        for key, value in api_data.items():
+            cfg.api_params[key] = value
         return cfg
+
+    def get_api_param(self, name: str, default: Any = None) -> Any:
+        """读取某个 API 参数的值。"""
+        return self.api_params.get(name, default)
 
 
 @dataclass
@@ -69,8 +84,8 @@ class PromptsConfig:
 
 @dataclass
 class AppConfig:
-    llm: EndpointConfig = field(default_factory=lambda: EndpointConfig())
-    vllm: EndpointConfig = field(default_factory=lambda: EndpointConfig(temperature=0.1, max_tokens=1024))
+    llm: EndpointConfig = field(default_factory=EndpointConfig)
+    vllm: EndpointConfig = field(default_factory=EndpointConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
 
