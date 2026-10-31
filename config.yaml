@@ -10,7 +10,7 @@ endpoints:
       read_timeout: 300    # 等待响应数据的超时（秒）
       max_retries: 3       # LLM 端点的失败重试次数配置。
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
-      model: "qwen35-thinking-general"
+      model: "qwen35-thinking-coding"
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
       top_k: 0             # 关闭（部分引擎用 0/负数表示禁用）
@@ -31,7 +31,7 @@ endpoints:
       max_retries: 3       # VLLM 端点的失败重试次数配置。
       batch_size: 8        # 并发识别图片数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
-      model: "qwen35-thinking-general"
+      model: "qwen35-thinking-coding"
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
       top_k: 0             # 关闭（部分引擎用 0/负数表示禁用）
@@ -49,17 +49,17 @@ paths:
   output: ""                                      # 结果输出 xlsx；留空表示直接写回 template 文件
   captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
   save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）
+  log_path: ""                                    # 运行日志文件路径；留空表示与模板同目录，文件名为 <模板名>.log
 
 prompts:
-  # LLM 评分项通用 Prompt，占位符：{key} {evaluation} {score_range}
-  #对每条细则独立判断，逐条给出证据后再打分，不得因前一条的结论影响后一条。
-  llm_item: |
-    你是一位非常严格且谨慎的课程任务评审教授。请严格按照给定的评分标准评分，对下述评分项进行评分。
-    对于给定的评分区间，请谨慎给出高于90%的评分，只有非常完美的内容，才能给出高于90分的评分。
-    
-    评分项编号：{key}
-    评分标准：{evaluation}
-    分数范围：{score_range}
+  # LLM 评分项批量 Prompt（一次提交所有 LLM 项，占位符：{items_section} {report}）
+  llm_batch: |
+    你是一位非常严格且谨慎的课程任务评审教授。请严格按照给定的评分标准，
+    对下述报告的所有 LLM 评分项完成批量评分。
+    评分值如果是区间，请谨慎给出高于90%的评分，只有非常完美的内容，才能给出高于90%的评分。
+
+    评分项列表（格式：评分项编号。评分标准；分数范围）：
+    {items_section}
 
     报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：
     ---
@@ -67,12 +67,12 @@ prompts:
     ---
 
     要求：
-    1. 评语用中文，简要说明给分理由（依据评分标准逐点说明）。
-    2. 如果评分标准中规定了超出上限的额外加分情形（如亲身体会、亲身经历），按标准执行。
-    3. confidence 表示你对本次评分的置信度，取值 0~1（1 表示非常确定）。
-    4. 只输出一个 JSON 对象，不要输出任何其他内容，格式：
+    1. 对每个评分项独立打分，评语用中文，简要说明给分理由。
+    2. confidence 表示你对本次评分的置信度，取值 0~1（1 表示非常确定）。
+    3. 如果评分标准中规定了超出上限的额外加分情形（如亲身体会、亲身经历），按标准执行。
+    4. 只输出一个 JSON 对象，不要输出任何其他内容，key 为评分项编号，value 为：
        {{"score": <数字>, "confidence": <0~1的数字>, "comment": "<评语>"}}
-  # 图片描述嵌入 MD 时的引导语
+
   image_context: |
     [图片描述 P{n}: {caption}]
   # vllm 多模态识图时发送给模型的提示词（会原样提交到 /chat/completions 的 text 内容）

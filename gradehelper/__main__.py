@@ -32,9 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default=None, help="结果输出 xlsx；默认写回模板文件")
     parser.add_argument("-v", "--verbose", action="store_true", help="调试日志")
     parser.add_argument("--skip-images", type=int, default=0, help="解析时跳过前面 N 张图片（默认 1）")
-    # stage = "doc"
+    stage = "doc"
     # stage = "pic"
-    stage = "sen"
+    # stage = "sen"
     # stage = "full"
     parser.add_argument("--stage", choices=["doc", "pic", "sen", "full"], default=stage,
                         help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，sen=llm语义评分，full=全部（默认）")

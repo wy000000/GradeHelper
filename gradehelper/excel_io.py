@@ -98,55 +98,114 @@ def read_result_scores(template_path: str | Path,
     return result
 
 
+def build_expected_headers(rules: list[RuleItem]) -> list[str]:
+    """根据评分规则构建 result 表期望的完整表头。"""
+    headers = ["学号", "姓名", "班级", "总分"]
+    for rule in rules:
+        headers.append(f"{rule.key}评分")
+        if rule.is_llm:
+            headers.append(f"{rule.key}置信度")
+        headers.append(f"{rule.key}评语")
+    return headers
+
+
 def write_results(template_path: str | Path, output_path: str | Path,
                   reports: list[ParsedReport], rules: list[RuleItem],
-                  scores: dict[str, dict[str, ItemScore]]) -> Path:
+                  scores: dict[str, dict[str, ItemScore]],
+                  mode: str = "upsert") -> Path:
     """把评分结果写入（同一文件的）result 表。
 
     列布局：学号 | 姓名 | 班级 | 总分 | (每项: <key>评分 [<key>置信度 仅LLM] <key>评语)
     总分列使用 Excel 公式 =分项1*权重1+分项2*权重2+...（加权求和）。scores 结构：学号 -> 评分项 -> ItemScore。
+
+    mode:
+      - "upsert":  按学号匹配，存在则更新该行，不存在则追加新行；保留其余旧行
+      - "strict":  按学号匹配更新，不存在则抛出 RuntimeError 退出程序；保留其余旧行
     """
     wb = load_workbook(template_path, data_only=False)
     ws = wb[RESULT_SHEET] if RESULT_SHEET in wb.sheetnames else wb.create_sheet(RESULT_SHEET)
-    ws.delete_rows(1, ws.max_row)  # 重建 result 表内容
 
-    # 表头
-    headers = ["学号", "姓名", "班级", "总分"]
-    score_columns: list[int] = []   # 各评分项所在列号（1-based），供总分公式引用
-    col = len(headers) + 1
+    # 计算列布局（与 replace 模式一致）
+    headers = build_expected_headers(rules)
+    score_columns: list[int] = []
+    col = 5  # 学号(1) 姓名(2) 班级(3) 总分(4)
     for rule in rules:
         score_columns.append(col)
-        headers.append(f"{rule.key}评分")
-        col += 1
+        col += 1  # 评分列
         if rule.is_llm:
-            headers.append(f"{rule.key}置信度")
-            col += 1
-        headers.append(f"{rule.key}评语")
-        col += 1
-    ws.append(headers)
+            col += 1  # 置信度列
+        col += 1  # 评语列
+    last_col = col - 1
 
-    # 数据行
-    for row_idx, report in enumerate(reports, start=2):
+    def _write_row(row_idx: int, report: ParsedReport) -> None:
+        """向指定行写入/更新一份报告的所有分数列。"""
         row_scores = scores.get(report.student_id, {})
-        # 总分公式：各评分项 * 对应权重的加权求和
-        terms = [f"{get_column_letter(c)}{row_idx}*{rule.weight}" for c, rule in zip(score_columns, rules)]
+        terms = [f"{get_column_letter(c)}{row_idx}*{rule.weight}"
+                 for c, rule in zip(score_columns, rules)]
         formula = "=" + "+".join(terms)
-        cells: list = [report.student_id, report.name, report.klass, formula]
-        for rule in rules:
+        ws.cell(row=row_idx, column=1, value=report.student_id)
+        ws.cell(row=row_idx, column=2, value=report.name)
+        ws.cell(row=row_idx, column=3, value=report.klass)
+        ws.cell(row=row_idx, column=4, value=formula)
+        for i, rule in enumerate(rules):
+            score_col = score_columns[i]
             item = row_scores.get(rule.key)
-            cells.append(item.score if item and item.score is not None else None)
+            ws.cell(row=row_idx, column=score_col,
+                    value=item.score if item and item.score is not None else None)
             if rule.is_llm:
-                cells.append(item.confidence if item and item.confidence is not None else None)
-            cells.append(item.comment if item else "")
-        ws.append(cells)
+                conf_col = score_col + 1
+                ws.cell(row=row_idx, column=conf_col,
+                        value=item.confidence if item and item.confidence is not None else None)
+                comment_col = conf_col + 1
+            else:
+                comment_col = score_col + 1
+            ws.cell(row=row_idx, column=comment_col,
+                    value=item.comment if item else "")
+
+    if mode in ("upsert", "strict"):
+        # 读取现有表头，建立 学号 -> 行号 映射
+        existing_header = [cell.value for cell in ws[1]] if ws.max_row >= 1 else []
+        if existing_header != headers:
+            # 表头缺失或不匹配，重建表头（相当于全部插入）
+            ws.delete_rows(1, ws.max_row)
+            ws.append(headers)
+            sid_to_row: dict[str, int] = {}
+            next_row = 2
+        else:
+            sid_col = 1
+            sid_to_row = {}
+            for row in range(2, ws.max_row + 1):
+                sid = ws.cell(row=row, column=sid_col).value
+                if sid is not None:
+                    sid_to_row[str(sid).strip()] = row
+            next_row = ws.max_row + 1
+
+        for report in reports:
+            sid = report.student_id
+            if sid in sid_to_row:
+                row_idx = sid_to_row[sid]
+            else:
+                if mode == "strict":
+                    raise RuntimeError(
+                        f"sen 阶段：学号 '{sid}' 在 result 表中不存在，无法更新，程序退出"
+                    )
+                row_idx = next_row
+                next_row += 1
+                # 如果当前只有表头没有数据，先确保新行能写入
+                if row_idx == 2 and ws.max_row == 1:
+                    pass
+            _write_row(row_idx, report)
+
+    else:
+        raise ValueError(f"未知的 write_results 模式: {mode}")
 
     # 冻结首行 + 自适应列宽（近似）
     ws.freeze_panes = "A2"
-    for c in range(1, len(headers) + 1):
+    for c in range(1, last_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 18
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
-    logger.info("评分结果已写入 %s（%d 行）", out, len(reports))
+    logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
     return out

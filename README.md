@@ -51,7 +51,7 @@ python -m gradehelper --reports ... --skip-images 5
 ## 配置（config.yaml）
 
 - `endpoints.llm` / `endpoints.vllm`：两个独立的 OpenAI 兼容端点（默认均为 `http://localhost:8080/` + `qwen35-thinking-general`，可各自覆盖）。llm用于文字评分，vllm用于图片识别。
-- `prompts.llm_item`：LLM 评分项通用 Prompt；`prompts.image_context`：图片描述嵌入模板
+- `prompts.llm_batch`：LLM 评分项批量 Prompt（一次提交所有 LLM 项）；`prompts.image_context`：图片描述嵌入模板
 - `paths.save_parsed`：已废弃，解析出的 md/图片始终保存到与原报告相同目录
 
 ## 灵活性

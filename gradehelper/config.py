@@ -10,14 +10,19 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
-DEFAULT_LLM_ITEM_PROMPT = (
-    "你是一份课程报告的评审助教。请严格按照给定的评分标准，对下述评分项进行评分。\n\n"
-    "评分项编号：{key}\n评分标准：{evaluation}\n分数范围：{score_range}\n\n"
-    "报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：\n---\n{report}\n---\n\n"
-    "要求：\n1. 评语用中文，简要说明给分理由。\n"
-    "2. 如果评分标准中规定了超出上限的额外加分情形，按标准执行。\n"
-    "3. confidence 表示你对本次评分的置信度，取值 0~1。\n"
-    '4. 只输出一个 JSON 对象：{{"score": <数字>, "confidence": <0~1的数字>, "comment": "<评语>"}}'
+# DEFAULT_LLM_ITEM_PROMPT 已移至 config.yaml prompts.llm_item（现不再使用，仅保留 llm_batch）
+DEFAULT_LLM_BATCH_PROMPT = (
+    "你是一份课程报告的评审助教。请严格按照给定的评分标准，"
+    "对下述报告的所有 LLM 评分项完成批量评分。\n\n"
+    "评分项列表（格式：评分项编号。评分标准；分数范围）：\n"
+    "{items_section}\n\n"
+    "报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：\n"
+    "---\n{report}\n---\n\n"
+    "要求：\n"
+    "1. 对每个评分项独立打分，评语用中文，简要说明给分理由。\n"
+    "2. confidence 表示你对本次评分的置信度，取值 0~1。\n"
+    '3. 只输出一个 JSON 对象，key 为评分项编号，value 为 {"score": <数字>, "confidence": <0~1的数字>, "comment": "<评语>"}。\n'
+    "4. 不要输出 JSON 之外的任何内容。\n"
 )
 
 
@@ -66,16 +71,14 @@ class PathsConfig:
     output: str = ""
     captions_dir: str = ""
     save_parsed: bool = False
+    log_path: str = ""  # 运行日志文件路径；留空表示与模板同目录，文件名为 <模板名>.log
 
 
 @dataclass
 class PromptsConfig:
-    llm_item: str = DEFAULT_LLM_ITEM_PROMPT
-    image_context: str = "[图片描述 P{n}: {caption}]"
-    image_prompt: str = (
-        "请详细描述这张课程报告插图的内容：图的类型（拓扑图/截图/表格/流程图/示意图等）、"
-        "核心元素与文字标注、技术上的合理性线索。只输出描述文字，不要任何前缀。"
-    )
+    llm_batch: str = ""
+    image_context: str = ""
+    image_prompt: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PromptsConfig":

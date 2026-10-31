@@ -9,7 +9,7 @@ from ..models import ParsedReport, RuleItem
 
 CODE_FENCE = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE = re.compile(r"`[^`\n]+`")
-LIST_LINE = re.compile(r"^\s{0,3}([-*·•]|\d+[.、)]|[（(]\d+[)）])\s+\S")
+LIST_LINE = re.compile(r"^\s*([-*·•]|\d+[.、)]|[（(]\d+[)）])\s*\S")
 
 # 模板中的题目要求（评估方法列给出的原文）
 REQUIREMENT_TEXT = (
