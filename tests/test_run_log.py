@@ -346,7 +346,7 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertNotIn("旧文档-doc", text)
         self.assertIn("新文档-pic", text)
 
-    def test_run_trims_before_appending_new_header(self):
+    def test_run_does_not_trim_log(self):
         now = datetime.now()
         old = self._run_block(now - timedelta(days=2), "OLD", pad=40_000)
         recent = self._run_block(now - timedelta(hours=1), "RECENT")
@@ -357,9 +357,55 @@ class TestAppendRunLog(unittest.TestCase):
                         template=str(self.tmp / "模板.xlsx"), stage="doc")
 
         text = self._read()
-        self.assertNotIn("标记: OLD", text)
+        self.assertIn("标记: OLD", text)
         self.assertIn("标记: RECENT", text)
-        self.assertEqual(text.count("GradeHelper 运行日志"), 2)  # recent + 本次运行
+        self.assertEqual(text.count("GradeHelper 运行日志"), 3)  # 旧记录 + recent + 本次运行
+
+
+class TestLogFileName(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.template = self.tmp / "模板.xlsx"
+        self.reports = self.tmp / "reports"
+        self.reports.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _grader(self, **paths_kwargs) -> Grader:
+        defaults = dict(
+            report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
+            report_name_separator="-",
+            log_name_format="{course}-{tagDep}-{reportName}.log",
+        )
+        defaults.update(paths_kwargs)
+        return Grader(AppConfig(paths=PathsConfig(**defaults)))
+
+    def _write_report(self, name: str) -> None:
+        (self.reports / name).write_bytes(b"")
+
+    def test_uses_course_tag_dep_and_report_name(self):
+        self._write_report("云安全-安全2401-2021001-张三-课程报告.docx")
+        path = self._grader()._resolve_log_path(self.template, self.reports, "计算机系")
+        self.assertEqual(path, self.tmp / "云安全-计算机系-课程报告.log")
+
+    def test_uses_first_sorted_report(self):
+        self._write_report("网络攻防-安全2401-2021002-李四-期中报告.docx")
+        self._write_report("云安全-安全2401-2021001-张三-课程报告.docx")
+        path = self._grader()._resolve_log_path(self.template, self.reports, "计算机系")
+        # 排序后“云安全...”在前（中文字符串排序）
+        self.assertEqual(path.name, "云安全-计算机系-课程报告.log")
+
+    def test_fallback_when_no_reports(self):
+        path = self._grader()._resolve_log_path(self.template, self.reports, "计算机系")
+        self.assertEqual(path, self.tmp / "未知课程-计算机系-未知报告.log")
+
+    def test_explicit_log_path_overrides_format(self):
+        custom = self.tmp / "custom.log"
+        path = self._grader(log_path=str(custom))._resolve_log_path(
+            self.template, self.reports, "计算机系")
+        self.assertEqual(path, custom)
 
 
 if __name__ == "__main__":

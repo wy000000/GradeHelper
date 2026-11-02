@@ -21,7 +21,7 @@ from openpyxl import load_workbook
 from .image_caption import caption_images, save_captions_txt
 from .llm_client import LLMClient
 from .models import ItemScore, ParsedReport, ReportImage, RuleItem
-from .parser import embed_captions, parse_all, parse_filename
+from .parser import embed_captions, parse_all, parse_filename, scan_reports
 from .progress import ParallelProgress
 from .rules_engine import run_program_rules
 
@@ -78,17 +78,54 @@ class Grader:
         """中断所有进行中的 LLM 请求（可重复调用）。"""
         self.cancel_token.cancel()
 
-    def _resolve_log_path(self, template: str | Path) -> Path:
+    def _resolve_log_path(self, template: str | Path,
+                          reports_dir: str | Path | None = None,
+                          tag_dep: str = "系部专业") -> Path:
         """确定运行日志文件路径。
 
         - 若 config.paths.log_path 非空，直接使用；
-        - 否则与模板文件同目录，文件名为 <模板名>.log。
+        - 否则按 config.paths.log_name_format 生成，放在模板同目录；
+        - 课程/报告名取报告目录中按文件名排序的第一份报告，无报告时用占位。
         """
         cfg = self.config
         log_path = (cfg.paths.log_path or "").strip()
         if log_path:
             return Path(log_path)
-        return Path(str(template) + ".log")
+
+        course = ""
+        report_name = ""
+        if reports_dir is not None:
+            try:
+                candidates = scan_reports(
+                    reports_dir,
+                    name_format=cfg.paths.report_name_format,
+                    separator=cfg.paths.report_name_separator,
+                )
+            except OSError:
+                candidates = []
+            if candidates:
+                meta = parse_filename(
+                    candidates[0],
+                    name_format=cfg.paths.report_name_format,
+                    separator=cfg.paths.report_name_separator,
+                )
+                if meta is not None:
+                    course, _klass, _sid, _name, report_name = meta
+
+        fmt = ((cfg.paths.log_name_format or "").strip()
+               or "{course}-{tagDep}-{reportName}.log")
+        try:
+            name = fmt.format(
+                course=course or "未知课程",
+                tagDep=tag_dep or "系部专业",
+                reportName=report_name or "未知报告",
+            )
+        except (KeyError, IndexError, ValueError) as exc:
+            logger.warning("日志文件名格式无效，使用默认名称: %s", exc)
+            name = f"未知课程-{tag_dep or '系部专业'}-未知报告.log"
+        # 禁止路径分隔符等非法文件名字符
+        name = re.sub(r'[\\/:*?"<>|]', "_", name)
+        return Path(template).parent / name
 
     @staticmethod
     def _split_log_records(text: str) -> list[str]:
@@ -781,9 +818,8 @@ class Grader:
         # 结果输出路径：显式指定优先；留空则按 paths.result_name_format 在模板同目录生成
         output = output or cfg.paths.output or None
 
-        # 确定运行日志文件路径；超过 32 KB 时先清理一天前的记录
-        self._log_path = self._resolve_log_path(template)
-        self._trim_log()
+        # 确定运行日志文件路径（按 course-tagDep-reportName.log 命名）
+        self._log_path = self._resolve_log_path(template, reports_dir, tag_dep)
         self._log_failed = False
         self.stage_logs.clear()
         run_start_dt = datetime.now()

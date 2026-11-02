@@ -1,0 +1,14 @@
+# Python 字节码缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 测试缓存
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 运行日志（结果与模板仍由仓库管理）
+*.log
