@@ -16,9 +16,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from gradehelper.config import load_config
     from gradehelper.grader import Grader
+    from gradehelper.progress import install_logging_bridge
 else:
     from .config import load_config
     from .grader import Grader
+    from .progress import install_logging_bridge
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # 日志输出前先清掉进度行，避免并行进度与日志互相覆盖
+    install_logging_bridge()
 
     config = load_config(args.config)
     grader = Grader(config)
@@ -62,7 +66,13 @@ def main(argv: list[str] | None = None) -> int:
             skip_images=args.skip_images,
             tag_dep=args.tagDep,
         )
+    except KeyboardInterrupt:
+        # 已完成的结果已由阶段逻辑保存；这里兜底关闭仍在飞的连接
+        grader.cancel()
+        logging.error("已取消（Ctrl+C）：已中断进行中的 vllm/llm 生成，已完成的评分已保存")
+        return 130
     except Exception as exc:  # noqa: BLE001 CLI 顶层统一报错
+        grader.cancel()
         logging.error("评分失败: %s", exc)
         return 1
     if output is not None:

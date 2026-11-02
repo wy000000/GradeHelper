@@ -61,6 +61,8 @@ class PathsConfig:
     captions_dir: str = ""
     save_parsed: bool = False
     log_path: str = ""  # 运行日志文件路径；留空表示与模板同目录，文件名为 <模板名>.log
+    log_max_size_kb: int = 32       # 日志超过该大小（KB）才清理旧记录；0 表示不清理
+    log_retention_days: float = 1.0  # 日志记录保留天数；0 表示不清理
     # 报告文件命名格式（用于解析文件名提取课程/班级/学号/姓名/报告名）
     report_name_format: str = ""
     report_name_separator: str = ""

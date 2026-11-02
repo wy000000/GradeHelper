@@ -7,8 +7,9 @@ endpoints:
       base_url: "http://localhost:8080/"
       api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
-      read_timeout: 300    # 等待响应数据的超时（秒）
+      read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 3       # LLM 端点的失败重试次数配置。
+      batch_size: 8        # sen 阶段并发提交的报告数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       model: "qwen35-thinking-coding"
       temperature: 0.0     # 贪心解码
@@ -27,7 +28,7 @@ endpoints:
       base_url: "http://localhost:8080/"
       api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
-      read_timeout: 300    # 等待响应数据的超时（秒）
+      read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 3       # VLLM 端点的失败重试次数配置。
       batch_size: 8        # 并发识别图片数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
@@ -50,6 +51,8 @@ paths:
   captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
   save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）
   log_path: ""                                    # 运行日志文件路径；留空表示与模板同目录，文件名为 <模板名>.log
+  log_max_size_kb: 32                             # 日志超过该大小（KB）才清理旧记录；0 表示不清理
+  log_retention_days: 1                           # 日志记录保留天数；0 表示不清理
   # 报告文件命名格式：字段模板与分隔符（用于从文件名解析 课程-班级-学号-姓名-报告名）
   report_name_format: "{course}-{klass}-{student_id}-{stdName}-{reportName}"
   report_name_separator: "-"

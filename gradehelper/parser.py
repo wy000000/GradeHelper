@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from .models import ParsedReport, ReportImage
@@ -400,8 +401,13 @@ def parse_all(
     name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
     separator: str = "-",
     tag_dep: str = "系部专业",
+    on_error: Callable[[Path, Exception], None] | None = None,
 ) -> list[ParsedReport]:
-    """扫描并解析目录下所有合规报告，解析结果全部驻留内存。"""
+    """扫描并解析目录下所有合规报告，解析结果全部驻留内存。
+
+    on_error 会在单份文档解析失败时被调用（参数为文件路径与异常），
+    便于调用方把失败记录到运行日志；回调异常不会中断其余文档解析。
+    """
     reports = []
     for path in scan_reports(reports_dir, name_format=name_format, separator=separator):
         try:
@@ -409,6 +415,11 @@ def parse_all(
                                         tag_dep=tag_dep))
         except Exception as exc:
             logger.error("解析失败 %s: %s", path.name, exc)
+            if on_error is not None:
+                try:
+                    on_error(path, exc)
+                except Exception:  # noqa: BLE001 记录失败不应影响解析流程
+                    logger.debug("解析失败回调异常", exc_info=True)
     return reports
 
 
