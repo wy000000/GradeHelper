@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 from .models import ItemScore, ParsedReport, RuleItem
@@ -53,13 +53,15 @@ def read_rules(template_path: str | Path) -> list[RuleItem]:
     return rules
 
 
-def read_result_scores(template_path: str | Path,
+def read_result_scores(xlsx_path: str | Path,
                        rule_keys: list[str] | None = None) -> dict[str, dict[str, float]]:
-    """读取 result 表中已写入的评分。
+    """读取独立结果文件 result 表中已写入的评分；文件不存在返回空。
 
     返回 {学号: {规则key: 分数}}。用于 sen 阶段读取 doc 阶段已写入的程序化规则分数。
     """
-    wb = load_workbook(template_path, data_only=True)
+    if not Path(xlsx_path).is_file():
+        return {}
+    wb = load_workbook(xlsx_path, data_only=True)
     if RESULT_SHEET not in wb.sheetnames:
         return {}
     ws = wb[RESULT_SHEET]
@@ -109,12 +111,13 @@ def build_expected_headers(rules: list[RuleItem]) -> list[str]:
     return headers
 
 
-def write_results(template_path: str | Path, output_path: str | Path,
+def write_results(output_path: str | Path,
                   reports: list[ParsedReport], rules: list[RuleItem],
                   scores: dict[str, dict[str, ItemScore]],
                   mode: str = "upsert") -> Path:
-    """把评分结果写入（同一文件的）result 表。
+    """把评分结果写入独立结果文件的 result 表（不修改评分模板文件）。
 
+    输出文件不存在时新建工作簿；存在时加载以保留既有行供 upsert/strict 匹配。
     列布局：学号 | 姓名 | 班级 | 总分 | (每项: <key>评分 [<key>置信度 仅LLM] <key>评语)
     总分列使用 Excel 公式 =分项1*权重1+分项2*权重2+...（加权求和）。scores 结构：学号 -> 评分项 -> ItemScore。
 
@@ -122,8 +125,14 @@ def write_results(template_path: str | Path, output_path: str | Path,
       - "upsert":  按学号匹配，存在则更新该行，不存在则追加新行；保留其余旧行
       - "strict":  按学号匹配更新，不存在则抛出 RuntimeError 退出程序；保留其余旧行
     """
-    wb = load_workbook(template_path, data_only=False)
-    ws = wb[RESULT_SHEET] if RESULT_SHEET in wb.sheetnames else wb.create_sheet(RESULT_SHEET)
+    out = Path(output_path)
+    if out.is_file():
+        wb = load_workbook(out, data_only=False)
+        ws = wb[RESULT_SHEET] if RESULT_SHEET in wb.sheetnames else wb.create_sheet(RESULT_SHEET)
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = RESULT_SHEET
 
     # 计算列布局（与 replace 模式一致）
     headers = build_expected_headers(rules)
@@ -144,7 +153,7 @@ def write_results(template_path: str | Path, output_path: str | Path,
                  for c, rule in zip(score_columns, rules)]
         formula = "=" + "+".join(terms)
         ws.cell(row=row_idx, column=1, value=report.student_id)
-        ws.cell(row=row_idx, column=2, value=report.name)
+        ws.cell(row=row_idx, column=2, value=report.std_name)
         ws.cell(row=row_idx, column=3, value=report.klass)
         ws.cell(row=row_idx, column=4, value=formula)
         for i, rule in enumerate(rules):
@@ -204,7 +213,6 @@ def write_results(template_path: str | Path, output_path: str | Path,
     for c in range(1, last_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 18
 
-    out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)

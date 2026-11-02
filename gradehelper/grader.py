@@ -89,11 +89,41 @@ class Grader:
         log_path.write_text("\n".join(lines), encoding="utf-8")
         logger.info("运行日志已写入: %s", log_path)
 
+    # ------------------------------------------------------------------ 结果文件路径
+
+    def _resolve_result_path(self, template: str | Path,
+                             reports: list[ParsedReport],
+                             output: str | Path | None = None) -> Path:
+        """确定评分结果 xlsx 路径（不写模板文件）。
+
+        - 显式 output（--output / paths.output）优先；
+        - 否则按 config.yaml 的 paths.result_name_format 生成文件名，落在与模板相同目录；
+          占位符：{course} {tagDep} {reportName}，取自第一份报告（同批次应一致）。
+        """
+        if output:
+            return Path(output)
+        fmt = (self.config.paths.result_name_format or "").strip()
+        if not fmt:
+            raise ValueError("config.yaml 缺少 paths.result_name_format 配置，且未指定 --output")
+        if not reports:
+            raise ValueError("无报告可用于生成结果文件名（或请显式指定 --output）")
+        first = reports[0]
+        courses = {r.course for r in reports}
+        report_names = {r.report_name for r in reports}
+        if len(courses) > 1 or len(report_names) > 1:
+            logger.warning("报告目录包含多个课程/报告类型，结果文件名取第一份: %s", first.base_name)
+        name = fmt.format(course=first.course, tagDep=first.tag_dep,
+                          reportName=first.report_name)
+        # 禁止路径分隔符等非法文件名字符，确保结果文件与模板同目录
+        name = re.sub(r'[\\/:*?"<>|]', "_", name)
+        return Path(template).parent / name
+
     # ------------------------------------------------------------------ 阶段 1：doc（解析 + 程序规则打分）
 
     def stage_doc(self, reports_dir: str | Path, template: str | Path,
-                  skip_images: int = 2) -> None:
-        """阶段 doc：解析所有文档 + 程序化规则打分，写入 result 表（LLM 项先写 0）。"""
+                  skip_images: int = 2, tag_dep: str = "系部专业",
+                  output: str | Path | None = None) -> Path:
+        """阶段 doc：解析所有文档 + 程序化规则打分，写入独立结果文件的 result 表（LLM 项先写 0）。"""
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -102,7 +132,12 @@ class Grader:
         error: str | None = None
         try:
             logger.info("【阶段 doc】解析报告目录: %s", reports_dir)
-            reports = parse_all(reports_dir)
+            reports = parse_all(
+            reports_dir,
+            name_format=cfg.paths.report_name_format,
+            separator=cfg.paths.report_name_separator,
+            tag_dep=tag_dep,
+        )
             if not reports:
                 raise RuntimeError(f"目录中没有符合命名格式的报告: {reports_dir}")
 
@@ -134,10 +169,12 @@ class Grader:
                 for key in llm_rule_keys:
                     sid_items[key] = ItemScore(key=key, score=0.0, confidence=None, comment="")
 
-            # 写入 result 表（按学号匹配：存在则更新，不存在则添加）
-            write_results(template, template, reports, rule_items, scores, mode="upsert")
-            logger.info("【阶段 doc】完成，程序化规则分数已写入 result 表（LLM 项已预置 0），耗时 %.2f 秒",
-                        time.perf_counter() - t0)
+            # 写入独立结果文件的 result 表（按学号匹配：存在则更新，不存在则添加；不修改模板）
+            result_path = self._resolve_result_path(template, reports, output)
+            write_results(result_path, reports, rule_items, scores, mode="upsert")
+            logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（LLM 项已预置 0），耗时 %.2f 秒",
+                        result_path, time.perf_counter() - t0)
+            return result_path
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
             raise
@@ -160,7 +197,7 @@ class Grader:
     # ------------------------------------------------------------------ 阶段 2：pic（vllm 图片识别 + 更新 md）
 
     def stage_pic(self, reports_dir: str | Path, template: str | Path,
-                  skip_images: int = 2) -> None:
+                  skip_images: int = 2, tag_dep: str = "系部专业") -> None:
         """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。"""
         cfg = self.config
         reports_dir = Path(reports_dir)
@@ -170,7 +207,7 @@ class Grader:
         error: str | None = None
         try:
             logger.info("【阶段 pic】从已保存的 md 与图片加载报告: %s", reports_dir)
-            reports = self._load_reports_for_pic(reports_dir, skip_images)
+            reports = self._load_reports_for_pic(reports_dir, skip_images, tag_dep=tag_dep)
             if not reports:
                 raise RuntimeError(f"目录中没有找到已保存的 md 文件: {reports_dir}")
 
@@ -182,7 +219,8 @@ class Grader:
                 logger.info("  图片描述已另存 %d 个 txt", saved)
             for report in reports:
                 report.md_text = embed_captions(report.md_text, report.images,
-                                                cfg.prompts.image_context)
+                                                cfg.prompts.image_context,
+                                                base_name=report.base_name)
 
             # 保存更新后的 md（带图片描述）
             self._save_parsed(reports)
@@ -210,8 +248,9 @@ class Grader:
     # ------------------------------------------------------------------ 阶段 3：sen（llm 语义评分 + 更新 result 表）
 
     def stage_sen(self, reports_dir: str | Path, template: str | Path,
-                  output: str | Path, skip_images: int = 2) -> Path:
-        """阶段 sen：llm 语义评分（单文件批量），写入最终 result 表。"""
+                  output: str | Path | None = None, skip_images: int = 2,
+                  tag_dep: str = "系部专业") -> Path:
+        """阶段 sen：llm 语义评分（单文件批量），写入独立结果文件的 result 表。"""
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -219,13 +258,18 @@ class Grader:
         reports: list[ParsedReport] = []
         error: str | None = None
         try:
-            # 读取 result 表中已存在的所有评分（不限 LLM 项，避免覆盖程序化规则分数）
+            # 读取评分要求（rule 表仍来自模板）
             rule_items = read_rules(template)
             llm_rules = [r for r in rule_items if r.is_llm]
-            existing_scores = read_result_scores(template)  # 读取全部评分列
 
             # 从磁盘读取已更新的 md（pic 阶段保存的）
-            reports = self._load_reports_for_pic(reports_dir, skip_images)
+            reports = self._load_reports_for_pic(reports_dir, skip_images, tag_dep=tag_dep)
+
+            # 独立结果文件路径（与 doc 阶段同一解析逻辑，读写同一文件）
+            result_path = self._resolve_result_path(template, reports, output)
+
+            # 读取结果文件中已存在的所有评分（不限 LLM 项，避免覆盖程序化规则分数）
+            existing_scores = read_result_scores(result_path)  # 读取全部评分列
 
             if not llm_rules:
                 logger.info("【阶段 sen】无 LLM 评分项，沿用已有分数")
@@ -242,17 +286,22 @@ class Grader:
                 # sen 阶段前置检查：result 表表头必须与当前规则完全匹配，
                 # 不匹配则报错退出，不进行任何 LLM 提交。
                 expected_header = build_expected_headers(rule_items)
-                wb_check = load_workbook(template, data_only=False)
-                if RESULT_SHEET in wb_check.sheetnames:
-                    ws_check = wb_check[RESULT_SHEET]
-                    existing_header = (
-                        [cell.value for cell in ws_check[1]] if ws_check.max_row >= 1 else []
-                    )
+                if result_path.is_file():
+                    wb_check = load_workbook(result_path, data_only=False)
+                    if RESULT_SHEET in wb_check.sheetnames:
+                        ws_check = wb_check[RESULT_SHEET]
+                        existing_header = (
+                            [cell.value for cell in ws_check[1]] if ws_check.max_row >= 1 else []
+                        )
+                    else:
+                        existing_header = []
                 else:
                     existing_header = []
                 if existing_header != expected_header:
                     raise RuntimeError(
-                        "sen 阶段：result 表表头与当前评分规则不匹配，程序退出，未进行 LLM 提交。\n"
+                        "sen 阶段：结果文件缺失或 result 表表头与当前评分规则不匹配，"
+                        "程序退出，未进行 LLM 提交（请先执行 doc 阶段生成结果文件）。\n"
+                        f"结果文件：{result_path}\n"
                         f"期望表头：{expected_header}\n"
                         f"现有表头：{existing_header}"
                     )
@@ -276,8 +325,8 @@ class Grader:
                     final_scores[sid] = row
                     logger.info("【阶段 sen】%d/%d, ID %s：", idx, total, sid)
 
-            # 汇总写入 result 表（按学号匹配：存在则更新，不存在则报错退出）
-            out = write_results(template, output, reports, rule_items, final_scores, mode="strict")
+            # 汇总写入独立结果文件的 result 表（按学号匹配：存在则更新，不存在则报错退出）
+            out = write_results(result_path, reports, rule_items, final_scores, mode="strict")
             logger.info("【阶段 sen】完成，最终评分已写入: %s，耗时 %.2f 秒", out,
                         time.perf_counter() - t0)
             return out
@@ -304,31 +353,32 @@ class Grader:
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, stage: str = "full",
-            skip_images: int = 2) -> Path | None:
+            skip_images: int = 2, tag_dep: str = "系部专业") -> Path | None:
         cfg = self.config
         reports_dir = reports_dir or cfg.paths.reports_dir
         template = template or cfg.paths.template
-        output = output or cfg.paths.output or template
+        # 结果输出路径：显式指定优先；留空则按 paths.result_name_format 在模板同目录生成
+        output = output or cfg.paths.output or None
 
         # 确定运行日志文件路径
         self._log_path = self._resolve_log_path(template)
 
         try:
             if stage == "full":
-                self.stage_doc(reports_dir, template, skip_images)
-                self.stage_pic(reports_dir, template, skip_images)
-                return self.stage_sen(reports_dir, template, output, skip_images)
+                self.stage_doc(reports_dir, template, skip_images, tag_dep=tag_dep, output=output)
+                self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
+                return self.stage_sen(reports_dir, template, output, skip_images, tag_dep=tag_dep)
 
             if stage == "doc":
-                self.stage_doc(reports_dir, template, skip_images)
-                return None
+                return self.stage_doc(reports_dir, template, skip_images, tag_dep=tag_dep,
+                                      output=output)
 
             if stage == "pic":
-                self.stage_pic(reports_dir, template, skip_images)
+                self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
                 return None
 
             if stage == "sen":
-                return self.stage_sen(reports_dir, template, output, skip_images)
+                return self.stage_sen(reports_dir, template, output, skip_images, tag_dep=tag_dep)
 
             raise ValueError(f"未知的 stage 参数: {stage}")
         finally:
@@ -337,49 +387,52 @@ class Grader:
 
     # ------------------------------------------------------------------ 从磁盘加载报告（供 pic 阶段使用，不重新解析 word）
 
-    PIC_PATTERN = re.compile(r"\[\[PIC:P(\d+)\]\]")
-
-    def _load_reports_for_pic(self, reports_dir: Path, skip_images: int) -> list[ParsedReport]:
+    def _load_reports_for_pic(self, reports_dir: Path, skip_images: int,
+                              tag_dep: str = "系部专业") -> list[ParsedReport]:
         """从 doc 阶段已保存的 md 与图片文件加载报告，不重新解析 word。
 
         扫描目录下所有 *.md 文件，从文件名解析元数据，读取 md 内容，
-        再从 md 中提取 [[PIC:Pn]] 占位符，按 {base_name}-P{n}.{ext} 模式
-        查找并读取对应图片文件。
+        再从 md 中提取 [[PIC:文件名]] 占位符中的完整图片文件名，
+        直接读取对应图片文件。
         """
-        IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"}
+        from .parser import parse_filename, PIC_PATTERN
         reports: list[ParsedReport] = []
+        name_format = self.config.paths.report_name_format
+        separator = self.config.paths.report_name_separator
         for md_path in sorted(reports_dir.glob("*.md")):
             if md_path.name.startswith("~$"):
                 continue
             try:
-                # 从 md 文件名解析：课程名称-专业班级-学号-姓名.md
-                parts = md_path.stem.rsplit("-", 3)
-                if len(parts) != 4:
+                meta = parse_filename(md_path, name_format=name_format, separator=separator, suffixes=(".md",))
+                if meta is None:
                     logger.warning("跳过不符合命名格式的 md 文件: %s", md_path.name)
                     continue
-                course, klass, student_id, name = parts
-                if not all(p.strip() for p in (course, klass, student_id, name)):
-                    continue
+                course, klass, student_id, std_name, report_name = meta
 
                 md_text = md_path.read_text(encoding="utf-8")
-                base_name = md_path.stem
 
-                # 从 md 中提取所有 [[PIC:Pn]] 占位符，确定图片索引
-                pic_indices = sorted({int(m) for m in self.PIC_PATTERN.findall(md_text)})
+                # 从 md 中提取所有 [[PIC:文件名]] 占位符，直接获取图片文件名
+                pic_files = PIC_PATTERN.findall(md_text)
 
                 images: list[ReportImage] = []
-                for pic_idx in pic_indices:
-                    img_data = None
-                    img_ext = None
-                    for ext in IMAGE_EXTS:
-                        candidate = md_path.parent / f"{base_name}-P{pic_idx}{ext}"
-                        if candidate.is_file():
-                            img_data = candidate.read_bytes()
-                            img_ext = ext.lstrip(".")
-                            break
-                    if img_data is None:
-                        logger.warning("未找到图片文件: %s-P%d.*", base_name, pic_idx)
+                seen_indices: set[int] = set()
+                for pic_file in pic_files:
+                    candidate = md_path.parent / pic_file
+                    if not candidate.is_file():
+                        logger.warning("未找到图片文件: %s", candidate)
                         continue
+                    # 从文件名解析索引：{base_name}-P{index}.{ext}
+                    stem = candidate.stem  # {base_name}-P{index}
+                    try:
+                        pic_idx = int(stem.split("-P")[-1])
+                    except (ValueError, IndexError):
+                        logger.warning("无法从图片文件名解析索引: %s", pic_file)
+                        continue
+                    if pic_idx in seen_indices:
+                        continue
+                    seen_indices.add(pic_idx)
+                    img_data = candidate.read_bytes()
+                    img_ext = candidate.suffix.lstrip(".")
                     images.append(ReportImage(index=pic_idx, ext=img_ext, data=img_data))
 
                 # 应用跳图策略：只保留 index > skip_images 的图片进行处理，
@@ -387,8 +440,10 @@ class Grader:
                 images = [img for img in images if img.index > skip_images]
 
                 reports.append(ParsedReport(
-                    course=course, klass=klass, student_id=student_id, name=name,
+                    course=course, klass=klass, student_id=student_id, std_name=std_name,
+                    report_name=report_name, tag_dep=tag_dep,
                     source_path=str(md_path), md_text=md_text, images=images,
+                    name_separator=separator,
                 ))
             except Exception as exc:  # noqa: BLE001
                 logger.error("加载报告失败 %s: %s", md_path.name, exc)

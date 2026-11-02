@@ -19,7 +19,7 @@ def has_name_id(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     missing = []
     if report.student_id not in text:
         missing.append("学号")
-    if report.name not in text:
+    if report.std_name not in text:
         missing.append("姓名")
     if not missing:
         return 0.0, "报告中包含姓名和学号，不扣分。"
@@ -31,7 +31,7 @@ def has_name_id(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
 def redundant_rname(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     """题目冗余：第一个姓名出现之前同时包含“课程报告”和“实验报告”则扣分。"""
     text = report.md_text
-    pos = text.find(report.name)
+    pos = text.find(report.std_name)
     prefix = text[:pos] if pos >= 0 else text
     if "课程报告" in prefix and "实验报告" in prefix:
         penalty = rule.default_numeric() or 0.0

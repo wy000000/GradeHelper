@@ -17,8 +17,10 @@ class TestEmbedCaptions(unittest.TestCase):
     TEMPLATE = "[图片描述 P{n}: {caption}]"
 
     def test_embed(self):
-        report = ParsedReport("云安全", "安全2401", "2024001", "张三", "d.docx",
-                              "开头\n[[PIC:P1]]\n结尾")
+        report = ParsedReport(course="云安全", klass="安全2401", student_id="2024001",
+                              std_name="张三", report_name="",
+                              source_path="d.docx",
+                              md_text="开头\n[[PIC:P1]]\n结尾")
         report.images = [ReportImage(index=1, ext="png", data=b"", caption="一张网络拓扑图")]
         md = embed_captions(report.md_text, report.images, self.TEMPLATE)
         self.assertIn("[图片描述 P1: 一张网络拓扑图]", md)

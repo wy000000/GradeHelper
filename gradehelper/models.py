@@ -68,15 +68,20 @@ class ParsedReport:
     course: str                   # 课程名称
     klass: str                    # 专业班级
     student_id: str               # 学号
-    name: str                     # 姓名
+    std_name: str                 # 学生姓名
+    report_name: str              # 报告名称（如“期中报告”、“课程设计”等）
     source_path: str              # 原 docx 路径
     md_text: str                  # Markdown 正文（图片处为占位符 [[PIC:Pn]]）
     images: list[ReportImage] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    name_separator: str = "-"     # 报告文件名分隔符，用于 base_name 重建文件名
+    tag_dep: str = "系部专业"     # 系部专业（CLI 参数 --tagDep，默认“系部专业”）
 
     @property
     def base_name(self) -> str:
-        return f"{self.course}-{self.klass}-{self.student_id}-{self.name}"
+        return self.name_separator.join(
+            [self.course, self.klass, self.student_id, self.std_name, self.report_name]
+        )
 
 
 @dataclass

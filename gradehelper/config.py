@@ -10,33 +10,20 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
-# DEFAULT_LLM_ITEM_PROMPT 已移至 config.yaml prompts.llm_item（现不再使用，仅保留 llm_batch）
-DEFAULT_LLM_BATCH_PROMPT = (
-    "你是一份课程报告的评审助教。请严格按照给定的评分标准，"
-    "对下述报告的所有 LLM 评分项完成批量评分。\n\n"
-    "评分项列表（格式：评分项编号。评分标准；分数范围）：\n"
-    "{items_section}\n\n"
-    "报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：\n"
-    "---\n{report}\n---\n\n"
-    "要求：\n"
-    "1. 对每个评分项独立打分，评语用中文，简要说明给分理由。\n"
-    "2. confidence 表示你对本次评分的置信度，取值 0~1。\n"
-    '3. 只输出一个 JSON 对象，key 为评分项编号，value 为 {"score": <数字>, "confidence": <0~1的数字>, "comment": "<评语>"}。\n'
-    "4. 不要输出 JSON 之外的任何内容。\n"
-)
+
 
 
 @dataclass
 class EndpointConfig:
-    """OpenAI 兼容端点配置（llm 与 vllm 均使用此结构，默认值可相同）。"""
+    """OpenAI 兼容端点配置（llm 与 vllm 均使用此结构，全部来自 YAML）。"""
 
     # ---- 客户端专用（来自 YAML 的 client 子区域，不会发送给 API）----
-    base_url: str = "http://localhost:8080/"
+    base_url: str = ""
     api_key: str = ""
-    connect_timeout: int = 5      # TCP/TLS 连接超时（秒）
-    read_timeout: int = 600       # 等待响应数据的超时（秒）
-    max_retries: int = 2
-    batch_size: int = 8
+    connect_timeout: int = 0      # TCP/TLS 连接超时（秒）
+    read_timeout: int = 0         # 等待响应数据的超时（秒）
+    max_retries: int = 0
+    batch_size: int = 0
 
     # ---- API 参数（来自 YAML 的 api 子区域，全部透传给 /chat/completions）----
     # api 子区域中出现的所有键值对原样存入此字典；新增任意键自动生效，无需改代码
@@ -66,12 +53,19 @@ class EndpointConfig:
 
 @dataclass
 class PathsConfig:
-    reports_dir: str = "./reports"
-    template: str = "云安全-课程报告-评分模板.xlsx"
+    """路径配置，全部来自 YAML。"""
+
+    reports_dir: str = ""
+    template: str = ""
     output: str = ""
     captions_dir: str = ""
     save_parsed: bool = False
     log_path: str = ""  # 运行日志文件路径；留空表示与模板同目录，文件名为 <模板名>.log
+    # 报告文件命名格式（用于解析文件名提取课程/班级/学号/姓名/报告名）
+    report_name_format: str = ""
+    report_name_separator: str = ""
+    # 结果文件命名模式（与模板同目录；占位符 {course}/{tagDep}/{reportName}）
+    result_name_format: str = ""
 
 
 @dataclass

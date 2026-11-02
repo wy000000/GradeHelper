@@ -4,7 +4,7 @@
 
 本系统设计易于扩展，可较容易地适配到各种课程的报告、试题、作业、试卷等材料的评阅。
 
-评阅项与评阅规则完全依赖于 `评分模板.xlsx`（`rule` 表决定评分项、权重、处理方法与评估标准；`result` 表写入评分结果）。**不同课程不同任务使用不同要求的评分模板**。
+评阅项与评阅规则完全依赖于 `评分模板.xlsx` 的 `rule` 表（决定评分项、权重、处理方法与评估标准）；评分结果写入与模板同目录的独立结果 xlsx 的 `result` 表（命名模式见 `paths.result_name_format`）。**不同课程不同任务使用不同要求的评分模板**。
 
 AI server API端点、路径及 Prompt 等均可在 `config.yaml` 中配置。
 
@@ -12,7 +12,7 @@ ver 0.1.0。当前版本支持课程报告自动评分。
 
 ## 流程
 
-对课程报告（docx）自动评分：docling 解析 → 程序化规则批处理 → vllm 图片识别 → LLM 评分项逐项评估 → 结果写回评分模板 xlsx 的 `result` 表。
+对课程报告（docx）自动评分：docling 解析 → 程序化规则批处理 → vllm 图片识别 → LLM 评分项逐项评估 → 结果写入与模板同目录的独立结果 xlsx 的 `result` 表。
 
 ## 安装
 
@@ -43,7 +43,7 @@ python -m gradehelper --reports ... --skip-images 5
 ```
 
 - 报告文件名格式：`课程名称-专业班级-学号-姓名.docx`（其他文件自动忽略）
-- 评分要求来自模板 xlsx 的 `rule` 表；结果写入同一文件的 `result` 表（总分列为 Excel 加权公式 `=分项1*权重1+分项2*权重2+...`；`置信度` 列仅 LLM 项写入）
+- 评分要求来自模板 xlsx 的 `rule` 表；结果写入独立结果 xlsx 的 `result` 表（与模板同目录，命名模式 `paths.result_name_format`，如 `云安全-计算机系-评分结果-期中报告.xlsx`；`评分结果` 为固定字符串。总分列为 Excel 加权公式 `=分项1*权重1+分项2*权重2+...`；`置信度` 列仅 LLM 项写入）
 - 图片描述另存为 `课程名称-专业班级-学号-姓名-Pn.txt`，并嵌入内存中的 Markdown 供 LLM 评估；解析出的 md 与图片始终保存到与原报告相同目录
 - `--skip-images N`：解析时跳过每份报告的前 N 张图片，剩余图片重新编号后参与后续识别与评分（默认 2）
 - `--stage`：doc/ pic/ sen/ full，三个阶段间通过已保存的 md 文件与 result 表交互，无需额外中间状态文件
@@ -52,6 +52,8 @@ python -m gradehelper --reports ... --skip-images 5
 
 - `endpoints.llm` / `endpoints.vllm`：两个独立的 OpenAI 兼容端点（默认均为 `http://localhost:8080/` + `qwen35-thinking-general`，可各自覆盖）。llm用于文字评分，vllm用于图片识别。
 - `prompts.llm_batch`：LLM 评分项批量 Prompt（一次提交所有 LLM 项）；`prompts.image_context`：图片描述嵌入模板
+- `paths.report_name_format` / `paths.report_name_separator`：报告文件名解析格式（默认 `{course}-{klass}-{student_id}-{stdName}-{reportName}`，分隔符 `-`）
+- `paths.result_name_format`：结果文件命名模式（默认 `{course}-{tagDep}-评分结果-{reportName}.xlsx`，落在与模板相同目录；`评分结果` 为固定字符串；可用 `--output` 显式覆盖）
 - `paths.save_parsed`：已废弃，解析出的 md/图片始终保存到与原报告相同目录
 
 ## 灵活性

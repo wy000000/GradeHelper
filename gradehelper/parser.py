@@ -18,29 +18,56 @@ logger = logging.getLogger(__name__)
 
 DOCX_SUFFIX = ".docx"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"}
-PIC_PATTERN = re.compile(r"\[\[PIC:P(\d+)]]")
+PIC_PATTERN = re.compile(r"\[\[PIC:([^\]]+)\]\]")
 
 
-def parse_filename(path: Path) -> tuple[str, str, str, str] | None:
-    """按 '课程名称-专业班级-学号-姓名.docx' 解析文件名；不符合格式返回 None。"""
-    if path.suffix.lower() != DOCX_SUFFIX or path.name.startswith("~$"):
+def parse_filename(
+    path: Path,
+    name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
+    separator: str = "-",
+    suffixes: tuple[str, ...] = (DOCX_SUFFIX,),
+) -> tuple[str, str, str, str, str] | None:
+    """按可配置的命名格式解析文件名；不符合格式返回 None。
+
+    name_format 中的占位符（如 {course}、{klass}、{student_id}、{stdName}、{reportName}）决定
+    从文件名右侧切分出多少段以及每段对应的字段名；separator 为分隔符；
+    suffixes 限定允许的文件扩展名（默认仅 .docx）。
+    """
+    if path.suffix.lower() not in suffixes or path.name.startswith("~$"):
         return None
-    parts = path.stem.rsplit("-", 3)
-    if len(parts) != 4:
+    fields = re.findall(r"\{(\w+)\}", name_format)
+    n_fields = len(fields)
+    if n_fields == 0:
         return None
-    course, klass, student_id, name = parts
-    if not all(p.strip() for p in (course, klass, student_id, name)):
+    parts = path.stem.rsplit(separator, n_fields - 1)
+    if len(parts) != n_fields:
         return None
-    return course, klass, student_id, name
+    values = dict(zip(fields, parts))
+    if not all(values.get(f, "").strip() for f in fields):
+        return None
+    course = values.get("course", "")
+    klass = values.get("klass", "")
+    student_id = values.get("student_id", "")
+    std_name = values.get("stdName", "")
+    report_name = values.get("reportName", "")
+    return course, klass, student_id, std_name, report_name
 
 
-def scan_reports(reports_dir: str | Path) -> list[Path]:
+def scan_reports(
+    reports_dir: str | Path,
+    name_format: str = "{course}-{klass}-{student_id}-{name}",
+    separator: str = "-",
+) -> list[Path]:
     """扫描目录（含子目录），仅保留文件名格式正确的 docx。"""
     root = Path(reports_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"报告目录不存在: {root}")
-    return [p for p in sorted(root.rglob("*"))
-            if p.is_file() and parse_filename(path=p) is not None]
+    return [
+        p for p in sorted(root.rglob("*"))
+        if p.is_file()
+        and p.suffix.lower() == DOCX_SUFFIX
+        and parse_filename(path=p, name_format=name_format, separator=separator) is not None
+    ]
 
 
 def _sniff_ext(data: bytes) -> str | None:
@@ -102,12 +129,14 @@ def _replace_image_ref(md: str, art_name: str, placeholder: str) -> str:
     return new_md
 
 
-def _docling_parse(path: Path) -> tuple[str, list[ReportImage]]:
+def _docling_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
     """用 docling 解析 docx，返回 (md 文本, 图片列表)。md 中图片位置为占位符。
 
     docling 对 DOCX 默认不导出图片工件（Markdown 中为 `<!-- image -->` 注释），
     因此 Markdown 由 docling 生成，图片二进制在工件不可用时用 python-docx
     按正文顺序提取后依次回填占位位置。
+
+    占位符格式：[[PIC:{base_name}-P{index}.{ext}]]
     """
     from docling.document_converter import DocumentConverter
 
@@ -135,11 +164,12 @@ def _docling_parse(path: Path) -> tuple[str, list[ReportImage]]:
     if not images:
         images = _extract_ordered_images(path)
 
-    # 3) 把 md 中的图片位置替换为占位符 [[PIC:Pn]]
+    # 3) 把 md 中的图片位置替换为占位符 [[PIC:base_name-Pn.ext]]
     for idx, art_name in enumerate(artifact_names, start=1):
         if idx <= len(images) and art_name and art_name in md:
-            md = _replace_image_ref(md, art_name, f"[[PIC:P{images[idx - 1].index}]]")
-    md = _place_placeholders(md, len(images))
+            img = images[idx - 1]
+            md = _replace_image_ref(md, art_name, f"[[PIC:{base_name}-P{img.index}.{img.ext}]]")
+    md = _place_placeholders(md, images, base_name)
 
     return md, images
 
@@ -172,34 +202,51 @@ def _extract_ordered_images(path: Path) -> list[ReportImage]:
     return images
 
 
-def _place_placeholders(md: str, count: int) -> str:
-    """按出现顺序把 md 中的图片位置替换为 [[PIC:Pn]]；未定位的占位符追加到文末。"""
-    if count <= 0:
+def _place_placeholders(md: str, images: list[ReportImage], base_name: str) -> str:
+    """按出现顺序把 md 中的图片位置替换为 [[PIC:base_name-Pn.ext]]；未定位的占位符追加到文末。"""
+    if not images:
         return md
     n = 0
 
     def _sub_comment(_match: re.Match) -> str:
         nonlocal n
         n += 1
-        return f"[[PIC:P{n}]]" if n <= count else ""
+        if n <= len(images):
+            img = images[n - 1]
+            return f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
+        return ""
 
     # docling 的 `<!-- image -->` 注释占位
     md = re.sub(r"<!--\s*image\s*-->", _sub_comment, md, flags=re.IGNORECASE)
-    if n < count:  # 剩余图片按 markdown 图片语法位置回填
+    if n < len(images):  # 剩余图片按 markdown 图片语法位置回填
 
         def _sub_mdimg(_match: re.Match) -> str:
             nonlocal n
             n += 1
-            return f"[[PIC:P{n}]]"
+            if n <= len(images):
+                img = images[n - 1]
+                return f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
+            return ""
 
         md = re.sub(r"!\[[^\]]*]\([^)]*\)", _sub_mdimg, md)
 
     total = len(PIC_PATTERN.findall(md))
-    if total < count:  # 仍未定位的图片，占位符追加到文末
-        md += "\n\n" + "\n".join(f"[[PIC:P{k}]]" for k in range(total + 1, count + 1))
-    elif total > count:  # 多余占位符清理
-        for k in range(count + 1, total + 1):
-            md = md.replace(f"[[PIC:P{k}]]", "", 1)
+    if total < len(images):  # 仍未定位的图片，占位符追加到文末
+        existing_indices = {
+            int(m.split("-P")[-1].split(".")[0])
+            for m in PIC_PATTERN.findall(md)
+            if "-P" in m
+        }
+        missing = [img for img in images if img.index not in existing_indices]
+        md += "\n\n" + "\n".join(
+            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]" for img in missing
+        )
+    elif total > len(images):  # 多余占位符清理
+        for img in images:
+            placeholder = f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
+            count = md.count(placeholder)
+            if count > 1:
+                md = md.replace(placeholder, "", count - 1)
     return md
 
 
@@ -261,7 +308,7 @@ def _extract_media(path: Path) -> list[tuple[bytes, str]]:
     return out
 
 
-def _docx_fallback_parse(path: Path) -> tuple[str, list[ReportImage]]:
+def _docx_fallback_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
     """python-docx 兜底：段落/表格转 md，图片按行内关系 + word/media 提取。"""
     import docx
     from docx.oxml.ns import qn
@@ -303,41 +350,63 @@ def _docx_fallback_parse(path: Path) -> tuple[str, list[ReportImage]]:
 
     md = "\n\n".join(lines)
     for img in images:
-        md = md.replace(f"[[IMG:{img.index}]]", f"[[PIC:P{img.index}]]", 1)
-    located = set(int(m) for m in PIC_PATTERN.findall(md))
-    missing = [img.index for img in images if img.index not in located]
+        md = md.replace(
+            f"[[IMG:{img.index}]]",
+            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]",
+            1,
+        )
+    located = {m.split("-P")[-1].split(".")[0] for m in PIC_PATTERN.findall(md) if "-P" in m}
+    missing = [img for img in images if str(img.index) not in located]
     if missing:
-        md += "\n\n" + "\n".join(f"[[PIC:P{n}]]" for n in missing)
+        md += "\n\n" + "\n".join(
+            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]" for img in missing
+        )
     return md, images
 
 
 # ------------------------------------------------------------------------ 对外接口
 
-def parse_report(path: Path) -> ParsedReport:
+def parse_report(
+    path: Path,
+    name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
+    separator: str = "-",
+    tag_dep: str = "系部专业",
+) -> ParsedReport:
     """解析单份报告；docling 优先，失败回退 python-docx。"""
-    meta = parse_filename(path)
+    meta = parse_filename(path, name_format=name_format, separator=separator)
     if meta is None:
-        raise ValueError(f"文件名不符合 '课程名称-专业班级-学号-姓名.docx' 格式: {path.name}")
-    course, klass, student_id, name = meta
+        raise ValueError(
+            f"文件名不符合命名格式 '{name_format}'（分隔符: {separator!r}）: {path.name}"
+        )
+    course, klass, student_id, std_name, report_name = meta
 
     warnings: list[str] = []
+    base_name = f"{course}{separator}{klass}{separator}{student_id}{separator}{std_name}{separator}{report_name}"
     try:
-        md, images = _docling_parse(path)
+        md, images = _docling_parse(path, base_name)
     except Exception as exc:  # docling 依赖模型，任何异常都走兜底
         warnings.append(f"docling 解析失败，回退 python-docx: {exc}")
         logger.warning("%s: docling 解析失败(%s)，回退 python-docx", path.name, exc)
-        md, images = _docx_fallback_parse(path)
+        md, images = _docx_fallback_parse(path, base_name)
 
-    return ParsedReport(course=course, klass=klass, student_id=student_id, name=name,
-                        source_path=str(path), md_text=md, images=images, warnings=warnings)
+    return ParsedReport(course=course, klass=klass, student_id=student_id, std_name=std_name,
+                        report_name=report_name, tag_dep=tag_dep,
+                        source_path=str(path), md_text=md, images=images, warnings=warnings,
+                        name_separator=separator)
 
 
-def parse_all(reports_dir: str | Path) -> list[ParsedReport]:
+def parse_all(
+    reports_dir: str | Path,
+    name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
+    separator: str = "-",
+    tag_dep: str = "系部专业",
+) -> list[ParsedReport]:
     """扫描并解析目录下所有合规报告，解析结果全部驻留内存。"""
     reports = []
-    for path in scan_reports(reports_dir):
+    for path in scan_reports(reports_dir, name_format=name_format, separator=separator):
         try:
-            reports.append(parse_report(path))
+            reports.append(parse_report(path, name_format=name_format, separator=separator,
+                                        tag_dep=tag_dep))
         except Exception as exc:
             logger.error("解析失败 %s: %s", path.name, exc)
     return reports
@@ -370,11 +439,12 @@ def _caption_block_span(md: str, template: str, index: int) -> tuple[int, int] |
     return None
 
 
-def embed_captions(md_text: str, images: list[ReportImage], template: str) -> str:
+def embed_captions(md_text: str, images: list[ReportImage], template: str,
+                   base_name: str = "") -> str:
     """把图片描述嵌入 md 中对应占位符位置。
 
-    - 占位符 [[PIC:Pn]] 始终保留（不消耗），描述块放在占位符之后；
-    - 首次运行：在 [[PIC:Pn]] 后追加描述块；
+    - 占位符 [[PIC:Pn]] 或 [[PIC:base_name-Pn.ext]] 始终保留（不消耗），描述块放在占位符之后；
+    - 首次运行：在占位符后追加描述块；
     - 重复运行：若已存在旧描述块则原位替换为新描述；
     - 不再清除未替换的占位符，以便 pic 阶段可重复执行。
     """
@@ -383,7 +453,10 @@ def embed_captions(md_text: str, images: list[ReportImage], template: str) -> st
         if not img.caption:
             continue
         block = template.format(n=img.index, caption=img.caption.strip())
-        placeholder = f"[[PIC:P{img.index}]]"
+        if base_name:
+            placeholder = f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
+        else:
+            placeholder = f"[[PIC:P{img.index}]]"
         span = _caption_block_span(result, template, img.index)
         if span is not None:
             start, end = span

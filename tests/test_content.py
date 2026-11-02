@@ -15,7 +15,8 @@ from gradehelper.rules.content import (  # noqa: E402
 
 
 def make_report(md: str) -> ParsedReport:
-    return ParsedReport(course="云安全", klass="安全2401", student_id="2024001", name="张三",
+    return ParsedReport(course="云安全", klass="安全2401", student_id="2024001",
+                        std_name="张三", report_name="",
                         source_path="dummy.docx", md_text=md)
 
 

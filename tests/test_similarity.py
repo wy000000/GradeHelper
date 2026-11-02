@@ -13,7 +13,8 @@ from gradehelper.rules.similarity import copied, euclidean_similarity  # noqa: E
 
 
 def make_report(md: str, sid: str, name: str) -> ParsedReport:
-    return ParsedReport(course="云安全", klass="安全2401", student_id=sid, name=name,
+    return ParsedReport(course="云安全", klass="安全2401", student_id=sid, std_name=name,
+                        report_name="",
                         source_path="dummy.docx", md_text=md)
 
 

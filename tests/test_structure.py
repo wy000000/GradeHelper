@@ -15,7 +15,8 @@ from gradehelper.rules.structure import has_catalogue, has_name_id, redundant_rn
 
 def make_report(md: str, sid: str = "2024001", name: str = "张三",
                 klass: str = "安全2401", course: str = "云安全") -> ParsedReport:
-    return ParsedReport(course=course, klass=klass, student_id=sid, name=name,
+    return ParsedReport(course=course, klass=klass, student_id=sid, std_name=name,
+                        report_name="",
                         source_path="dummy.docx", md_text=md)
 
 
@@ -27,12 +28,12 @@ def make_rule(key: str, default: str, method: str = "rule",
 
 class TestFilename(unittest.TestCase):
     def test_valid(self):
-        self.assertEqual(parse_filename(Path("云安全-安全2401-2024001-张三.docx")),
-                         ("云安全", "安全2401", "2024001", "张三"))
+        self.assertEqual(parse_filename(Path("云安全-安全2401-2024001-张三-期中报告.docx")),
+                         ("云安全", "安全2401", "2024001", "张三", "期中报告"))
 
     def test_course_with_dash(self):
-        self.assertEqual(parse_filename(Path("云原生-安全-安全2401-2024001-张三.docx")),
-                         ("云原生-安全", "安全2401", "2024001", "张三"))
+        self.assertEqual(parse_filename(Path("云原生-安全-安全2401-2024001-张三-期中报告.docx")),
+                         ("云原生-安全", "安全2401", "2024001", "张三", "期中报告"))
 
     def test_invalid(self):
         self.assertIsNone(parse_filename(Path("report.docx")))
