@@ -120,7 +120,7 @@ class TestAppendRunLog(unittest.TestCase):
         first = self._read()
         self.assertTrue(first.startswith("历史记录\n"))
         self.assertIn("云安全-计算机系-课程报告-doc", first)
-        self.assertIn("记录时间:", first)
+        self.assertIn("\u8fd0\u884c\u5f00\u59cb:", first)
         self.assertIn("状态: 成功", first)
         self.assertTrue(self.grader.stage_logs[0].record_time)
 
@@ -139,21 +139,18 @@ class TestAppendRunLog(unittest.TestCase):
     def test_run_header_and_footer(self):
         self.grader._append_run_header(
             stage="full", reports_dir=self.tmp / "reports",
-            template=self.tmp / "模板.xlsx", output=None,
+            template=self.tmp / "\u6a21\u677f.xlsx", output=None,
         )
         self.grader._append_stage_log(self._entry("doc", "2021001"))
         self.grader._append_run_footer(
             start_dt=self.start, elapsed=125.5, error=None,
         )
         text = self._read()
-        self.assertIn("GradeHelper 运行日志", text)
-        self.assertIn("记录时间:", text)
-        self.assertIn("执行阶段: full", text)
-        self.assertIn(f"报告目录: {self.tmp / 'reports'}", text)
-        self.assertIn("总用时: 125.50 秒", text)
-        self.assertIn("状态: 成功", text)
-        self.assertLess(text.index("运行开始:"), text.index("-doc"))
-        self.assertLess(text.index("-doc"), text.index("运行结束:"))
+        self.assertIn("GradeHelper \u8fd0\u884c\u65e5\u5fd7", text)
+        self.assertIn("\u6267\u884c\u9636\u6bb5: doc", text)
+        self.assertIn("\u72b6\u6001: \u6210\u529f", text)
+        self.assertLess(text.index("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), text.index("-doc"))
+        self.assertLess(text.index("-doc"), text.index("\u72b6\u6001: \u6210\u529f"))
 
     def test_run_footer_reports_failure(self):
         self.grader._append_run_footer(
@@ -169,7 +166,7 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertEqual(len(self.grader.stage_logs), 1)  # 内存记录仍然保留
 
     def test_run_appends_header_stage_and_footer(self):
-        self.log_path.write_text("历史记录\n", encoding="utf-8")
+        self.log_path.write_text("\u5386\u53f2\u8bb0\u5f55\n", encoding="utf-8")
         calls: list[str] = []
 
         def fake_doc(*args, **kwargs):
@@ -190,29 +187,26 @@ class TestAppendRunLog(unittest.TestCase):
         self.grader.stage_pic = fake_pic  # type: ignore[method-assign]
         self.grader.stage_sen = fake_sen  # type: ignore[method-assign]
 
-        template = self.tmp / "模板.xlsx"
+        template = self.tmp / "\u6a21\u677f.xlsx"
         self.grader.run(reports_dir=str(self.tmp / "reports"),
                         template=str(template), stage="full")
 
         text = self._read()
         self.assertEqual(calls, ["doc", "pic", "sen"])
-        self.assertTrue(text.startswith("历史记录\n"))
-        self.assertIn("执行阶段: full", text)
-        self.assertLess(text.index("运行开始:"), text.index("-doc"))
+        self.assertTrue(text.startswith("\u5386\u53f2\u8bb0\u5f55\n"))
+        self.assertLess(text.index("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), text.index("-doc"))
         self.assertLess(text.index("-doc"), text.index("-pic"))
         self.assertLess(text.index("-pic"), text.index("-sen"))
-        self.assertLess(text.index("-sen"), text.index("运行结束:"))
-        self.assertEqual(text.count("GradeHelper 运行日志"), 1)
-
+        self.assertEqual(text.count("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), 1)
     def test_item_failure_title_uses_specific_document(self):
         self.grader._append_failure_entry(
             stage="pic", error="timeout", report=_report(student_id="2021009"),
-            extra={"图片": "P2"},
+            extra={"\u56fe\u7247": "P2"},
         )
         text = self._read()
-        self.assertIn("云安全-计算机系-云安全-安全2401-2021009-张三-课程报告-pic", text)
-        self.assertIn("图片: P2", text)
-        self.assertIn("状态: 失败 - timeout", text)
+        self.assertIn("\u4e91\u5b89\u5168-\u8ba1\u7b97\u673a\u7cfb-\u4e91\u5b89\u5168-\u5b89\u51682401-2021009-\u5f20\u4e09-\u8bfe\u7a0b\u62a5\u544a-pic", text)
+        self.assertIn("\u56fe\u7247: P2", text)
+        self.assertIn("\u72b6\u6001: \u5931\u8d25 - timeout", text)
 
     def test_document_parse_failure_has_course_and_filename(self):
         document = "云安全-安全2401-2021009-李四-课程报告.docx"

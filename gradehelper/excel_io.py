@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
+from .file_claim import ResultFileClaim
 from .models import ItemScore, ParsedReport, RuleItem
 
 logger = logging.getLogger(__name__)
@@ -53,11 +56,12 @@ def read_rules(template_path: str | Path) -> list[RuleItem]:
     return rules
 
 
-def read_result_scores(xlsx_path: str | Path,
-                       rule_keys: list[str] | None = None) -> dict[str, dict[str, float]]:
-    """读取独立结果文件 result 表中已写入的评分；文件不存在返回空。
+def read_result_items(xlsx_path: str | Path,
+                      rule_keys: list[str] | None = None) -> dict[str, dict[str, ItemScore]]:
+    """读取独立结果文件 result 表中已写入的评分项（分数/置信度/评语）。
 
-    返回 {学号: {规则key: 分数}}。用于 sen 阶段读取 doc 阶段已写入的程序化规则分数。
+    文件不存在或无 result 表时返回空。返回 {学号: {规则key: ItemScore}}。
+    用于 sen 阶段在更新 LLM 项时保留 doc 阶段写入的程序化规则分数与评语。
     """
     if not Path(xlsx_path).is_file():
         return {}
@@ -66,38 +70,54 @@ def read_result_scores(xlsx_path: str | Path,
         return {}
     ws = wb[RESULT_SHEET]
 
-    header = [cell.value for cell in ws[1]]
+    header = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
     try:
         sid_col = header.index("学号") + 1
     except ValueError:
         return {}
 
-    # 定位各规则分数列（<key>评分）
-    score_cols: dict[str, int] = {}
+    # 定位各评分项的三类列：<key>评分 / <key>置信度 / <key>评语
+    columns: dict[str, dict[str, int]] = {}
     for idx, h in enumerate(header, start=1):
-        if h is None:
-            continue
-        h = str(h)
-        if h.endswith("评分"):
-            key = h[:-2]
-            if rule_keys is None or key in rule_keys:
-                score_cols[key] = idx
+        for suffix, field in (("评分", "score"), ("置信度", "confidence"), ("评语", "comment")):
+            if h.endswith(suffix):
+                key = h[:-len(suffix)]
+                if rule_keys is None or key in rule_keys:
+                    columns.setdefault(key, {})[field] = idx
+                break
 
-    result: dict[str, dict[str, float]] = {}
+    result: dict[str, dict[str, ItemScore]] = {}
     for row in range(2, ws.max_row + 1):
         sid = ws.cell(row=row, column=sid_col).value
         if sid is None:
             continue
         sid_str = str(sid).strip()
-        row_scores: dict[str, float] = {}
-        for key, col in score_cols.items():
-            val = ws.cell(row=row, column=col).value
-            try:
-                row_scores[key] = float(val) if val is not None else 0.0
-            except (TypeError, ValueError):
-                row_scores[key] = 0.0
-        result[sid_str] = row_scores
+        row_items: dict[str, ItemScore] = {}
+        for key, cols in columns.items():
+            score_col = cols.get("score")
+            if score_col is None:
+                continue
+            score = _cell_float(ws.cell(row=row, column=score_col).value)
+            confidence = (_cell_float(ws.cell(row=row, column=cols["confidence"]).value)
+                          if "confidence" in cols else None)
+            comment_val = (ws.cell(row=row, column=cols["comment"]).value
+                           if "comment" in cols else None)
+            row_items[key] = ItemScore(
+                key=key,
+                score=score,
+                confidence=confidence,
+                comment=str(comment_val).strip() if comment_val is not None else "",
+            )
+        result[sid_str] = row_items
     return result
+
+
+def _cell_float(value) -> float | None:
+    """把单元格值转换为 float；空值或无法转换时返回 None。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_expected_headers(rules: list[RuleItem]) -> list[str]:
@@ -111,13 +131,13 @@ def build_expected_headers(rules: list[RuleItem]) -> list[str]:
     return headers
 
 
-def write_results(output_path: str | Path,
-                  reports: list[ParsedReport], rules: list[RuleItem],
-                  scores: dict[str, dict[str, ItemScore]],
-                  mode: str = "upsert") -> Path:
-    """把评分结果写入独立结果文件的 result 表（不修改评分模板文件）。
+def build_results_workbook(source_path: str | Path,
+                           reports: list[ParsedReport], rules: list[RuleItem],
+                           scores: dict[str, dict[str, ItemScore]],
+                           mode: str = "upsert") -> Workbook:
+    """基于 source_path 构建写入评分后的工作簿（不落盘）。
 
-    输出文件不存在时新建工作簿；存在时加载以保留既有行供 upsert/strict 匹配。
+    源文件不存在时新建工作簿；存在时加载以保留既有行供 upsert/strict 匹配。
     列布局：学号 | 姓名 | 班级 | 总分 | (每项: <key>评分 [<key>置信度 仅LLM] <key>评语)
     总分列使用 Excel 公式 =分项1*权重1+分项2*权重2+...（加权求和）。scores 结构：学号 -> 评分项 -> ItemScore。
 
@@ -125,7 +145,7 @@ def write_results(output_path: str | Path,
       - "upsert":  按学号匹配，存在则更新该行，不存在则追加新行；保留其余旧行
       - "strict":  按学号匹配更新，不存在则抛出 RuntimeError 退出程序；保留其余旧行
     """
-    out = Path(output_path)
+    out = Path(source_path)
     if out.is_file():
         wb = load_workbook(out, data_only=False)
         ws = wb[RESULT_SHEET] if RESULT_SHEET in wb.sheetnames else wb.create_sheet(RESULT_SHEET)
@@ -212,8 +232,68 @@ def write_results(output_path: str | Path,
     ws.freeze_panes = "A2"
     for c in range(1, last_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 18
+    return wb
 
+
+def write_results(output_path: str | Path,
+                  reports: list[ParsedReport], rules: list[RuleItem],
+                  scores: dict[str, dict[str, ItemScore]],
+                  mode: str = "upsert") -> Path:
+    """把评分结果就地写入独立结果文件的 result 表（不修改评分模板文件）。"""
+    out = Path(output_path)
+    wb = build_results_workbook(out, reports, rules, scores, mode)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
     return out
+
+
+def write_results_atomic(output_path: str | Path,
+                         reports: list[ParsedReport], rules: list[RuleItem],
+                         scores: dict[str, dict[str, ItemScore]],
+                         mode: str = "upsert",
+                         claim: ResultFileClaim | None = None,
+                         retries: int = 6, retry_delay: float = 1.0) -> Path:
+    """写结果表：先写同目录临时文件再原子替换，目标被占用时重试且不损坏原文件。
+
+    与 write_results 的区别只在落盘方式：内容先完整写到
+    `.<结果文件名>.<pid>.tmp.xlsx`，再 os.replace() 覆盖目标文件。
+    Windows 上目标文件被 Excel 等程序打开时替换会被拒绝，因此每次尝试前临时释放
+    claim、替换后重新占用（claim 见 file_claim.ResultFileClaim，用于 doc/sen 阶段
+    运行期间独占结果文件）。重试用尽仍失败时：原结果文件保持不变，新结果完整
+    保留在临时文件中，异常信息会给出该路径，关闭 Excel 后可改名取用或重新运行。
+    """
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f".~{out.stem}.{os.getpid()}.tmp{out.suffix}")
+    total = max(1, retries)
+    last_exc: OSError | None = None
+    for attempt in range(1, total + 1):
+        released = False
+        try:
+            # 先完整构建并写临时文件（不与任何程序冲突），再替换目标文件
+            wb = build_results_workbook(out, reports, rules, scores, mode)
+            wb.save(tmp)
+            if claim is not None and claim.held:
+                claim.release()  # 替换目标文件需要独占，Windows 上被占用会拒绝
+                released = True
+            os.replace(tmp, out)
+            last_exc = None
+            break
+        except OSError as exc:
+            last_exc = exc
+            logger.warning("结果文件被占用，第 %d/%d 次写入失败: %s", attempt, total, exc)
+            if attempt < total:
+                time.sleep(max(0.0, retry_delay))
+        finally:
+            if released:
+                claim.acquire(raise_on_error=False)  # 尽力恢复独占占用
+    if last_exc is not None:
+        hint = (f"本次结果已完整保存到临时文件：{tmp}" if tmp.is_file()
+                else "结果文件未被改动")
+        raise RuntimeError(
+            "结果文件无法写入（可能已被其它程序如 Excel 打开），请关闭后重试；" + hint
+        ) from last_exc
+    logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
+    return out
+

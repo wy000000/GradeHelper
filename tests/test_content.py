@@ -67,6 +67,18 @@ class TestHasRequirement(unittest.TestCase):
                                           "题目要求原文", 0.9))
         self.assertFalse(window_similarity("完全无关的内容", "题目要求原文", 0.9))
 
+    def test_similar_window_found_regardless_of_text_offset(self):
+        # 报告表述与题目要求仅有个别字差异（相似度 >= 90% 但不是完全子串）：
+        # 无论正文整体平移多少（如 doc 阶段去除空行、移除跳过图片的占位符），都应命中。
+        # 旧实现用固定步长网格扫描，偏移量不是步长整数倍时会漏判。
+        pattern = "1、针对某一云安全问题进行论述，叙述其产生的原因，带来的危害，解决的方法。"
+        variant = "1、针对某一云安全问题进行论述，叙述其产生的原因，带来的危患，解决的手段。"
+        self.assertNotIn(variant, pattern)
+        for pad in range(5):
+            text = "甲" * pad + variant + "正文内容" * 8
+            self.assertTrue(window_similarity(text, pattern, 0.9),
+                            msg=f"偏移 {pad} 个字符时漏判")
+
 
 class TestSummaryKeywords(unittest.TestCase):
     def test_keywords(self):
@@ -74,10 +86,34 @@ class TestSummaryKeywords(unittest.TestCase):
         self.assertEqual(summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 2.0)
         self.assertEqual(summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 2.0)
 
+    def test_docker_synonyms_case_insensitive(self):
+        for md in (
+            "正文\n\n## 总结\n掌握了容器与 Container 技术。",
+            "正文\n\n## 总结\n学会了制作 Image 镜像。",
+            "正文\n\n## 总结\n深入理解了 DOCKER 的编排。",
+        ):
+            self.assertEqual(
+                summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 2.0)
+
+    def test_nosql_synonyms_case_insensitive(self):
+        for md in (
+            "正文\n\n## 总结\n了解了非关系型数据库与文档数据库。",
+            "正文\n\n## 总结\n研究了列存储与键值存储的特点。",
+            "正文\n\n## 总结\n对比了 HBase 与 MONGODB。",
+        ):
+            self.assertEqual(
+                summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 2.0)
+
     def test_absent(self):
         no = make_report("正文\n\n## 总结\n没有涉及重点内容。")
         self.assertEqual(summary_docker(no, make_rule("summaryDocker", "2"))[0], 0.0)
         self.assertEqual(summary_sql(no, make_rule("summarySql", "2"))[0], 0.0)
+
+    def test_keyword_only_in_body_not_counted(self):
+        # 关键字只出现在正文前部、不在最后总结部分时不应加分
+        md = "docker 与 nosql 的知识\n\n## 总结\n本课程收获很大。"
+        self.assertEqual(summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 0.0)
+        self.assertEqual(summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 0.0)
 
 
 if __name__ == "__main__":

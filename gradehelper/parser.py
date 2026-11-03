@@ -3,7 +3,7 @@
 - 主解析器：docling（版面分析，表格/图片/阅读顺序还原更准确）
 - 兜底解析器：python-docx（docling 失败时使用）
 - 文件名格式：课程名称-专业班级-学号-姓名.docx（课程名称可含 '-'，按右侧三段切分）
-- md 中图片位置使用占位符 [[PIC:Pn]]，后续由 vllm 描述结果替换
+- md 中图片位置使用占位符 [[PIC:Pn]] 或 [[PIC:base_name-Pn.ext]]，后续由 vllm 描述结果替换
 """
 
 from __future__ import annotations
@@ -475,3 +475,38 @@ def embed_captions(md_text: str, images: list[ReportImage], template: str,
         elif placeholder in result:
             result = result.replace(placeholder, placeholder + block, 1)
     return re.sub(r"\n{3,}", "\n\n", result).strip() + "\n"
+
+
+# ------------------------------------------------------------------------ md 清理（doc 阶段）
+
+def _placeholder_index(token: str) -> int | None:
+    """从占位符内容解析图片编号 n；兼容 "Pn" 与 "base_name-Pn.ext" 两种格式。"""
+    match = re.search(r"P(\d+)(?:\..*)?$", token)
+    return int(match.group(1)) if match else None
+
+
+def remove_skipped_placeholders(md: str, skip_images: int) -> str:
+    """移除被跳过图片（编号 1..skip_images）的占位符，其余占位符保持原样。
+
+    md 中的占位符可能是短格式 [[PIC:Pn]]（测试/兜底），也可能是解析时写入的
+    完整格式 [[PIC:base_name-Pn.ext]]；无法解析出编号的占位符不删除。
+    """
+    if skip_images <= 0 or "[[PIC:" not in md:
+        return md
+
+    def _sub(match: re.Match) -> str:
+        index = _placeholder_index(match.group(1))
+        return "" if index is not None and index <= skip_images else match.group(0)
+
+    return PIC_PATTERN.sub(_sub, md)
+
+
+def strip_blank_lines(md: str) -> str:
+    """去除空行（含仅含空白字符的行），非空行内容原样保留。
+
+    结果非空时以单个换行结尾；仅删除空行，不合并相邻的非空行。
+    """
+    lines = [line for line in md.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"

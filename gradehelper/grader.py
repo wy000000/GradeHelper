@@ -12,16 +12,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import __version__
+
 from .cancel import CancelToken, LLMAborted
 from .config import AppConfig
 from .excel_io import (
-    read_result_scores, read_rules, write_results, build_expected_headers, RESULT_SHEET
+    read_result_items, read_rules, write_results_atomic, build_expected_headers, RESULT_SHEET
 )
 from openpyxl import load_workbook
-from .image_caption import caption_images, save_captions_txt
+from .file_claim import ResultFileClaim
+from .image_caption import caption_images, save_caption_txt, save_captions_txt
 from .llm_client import LLMClient
 from .models import ItemScore, ParsedReport, ReportImage, RuleItem
-from .parser import embed_captions, parse_all, parse_filename, scan_reports
+from .parser import (
+    embed_captions, parse_all, parse_filename, remove_skipped_placeholders,
+    scan_reports, strip_blank_lines,
+)
 from .progress import ParallelProgress
 from .rules_engine import run_program_rules
 
@@ -33,6 +39,7 @@ _RECORD_TIME_RE = re.compile(
 )
 _SEP_EQ = "=" * 60
 _SEP_DASH = "-" * 60
+_LOG_TITLE = "GradeHelper \u8fd0\u884c\u65e5\u5fd7 Ver " + __version__
 
 
 @dataclass
@@ -51,6 +58,9 @@ class StageLogEntry:
     tag_dep: str = ""               # 系部专业（取第一份报告；无报告时用 CLI 参数）
     report_name: str = ""           # 报告名称（取第一份报告）
     document: str = ""              # 具体文档名（单项失败时写入标题）
+    reports_dir: str = ""           # reports directory (stage summary)
+    template: str = ""              # reports directory (stage summary)
+    output: str = ""                # result file (doc/sen stage)
     extra: dict[str, str] = field(default_factory=dict)  # 阶段附加信息
     record_time: str = ""           # 日志记录写入时间（清理依据）
 
@@ -129,33 +139,35 @@ class Grader:
 
     @staticmethod
     def _split_log_records(text: str) -> list[str]:
-        """按当前日志格式切分记录。
-
-        记录以 60 个 ``=`` 或 ``-`` 结尾；每条记录都带自己的
-        ``记录时间``。无法识别时间的记录会原样保留。
-        """
         lines = text.splitlines(keepends=True)
         records: list[str] = []
         buf: list[str] = []
         idx = 0
-        while idx < len(lines):
-            line = lines[idx]
-            buf.append(line)
+        n = len(lines)
+        def flush() -> None:
+            nonlocal buf
+            if "".join(buf).strip():
+                records.append("".join(buf))
+            buf = []
+        while idx < n:
+            if (idx + 1 < n and lines[idx].rstrip("\r\n") == _SEP_EQ
+                    and "GradeHelper \u8fd0\u884c\u65e5\u5fd7" in lines[idx + 1]):
+                flush()
+                buf.append(lines[idx]); idx += 1
+                buf.append(lines[idx]); idx += 1
+                if idx < n and lines[idx].rstrip("\r\n") == _SEP_EQ:
+                    buf.append(lines[idx]); idx += 1
+                continue
+            buf.append(lines[idx])
+            marker = lines[idx].rstrip("\r\n")
             idx += 1
-            marker = line.rstrip("\r\n")
-            if marker in (_SEP_EQ, _SEP_DASH):
-                content = "".join(buf).strip()
-                # 记录开头的分隔线（内容只有分隔线）不结束记录
-                if content and content != marker:
-                    # 记录末尾的空行归属当前记录，删除时一并清理
-                    while idx < len(lines) and not lines[idx].strip():
-                        buf.append(lines[idx])
-                        idx += 1
-                    records.append("".join(buf))
-                    buf = []
-        if buf:
-            records.append("".join(buf))
+            if marker in (_SEP_EQ, _SEP_DASH) and (idx >= n or not lines[idx].strip()):
+                flush()
+                while idx < n and not lines[idx].strip():
+                    idx += 1
+        flush()
         return records
+
 
     def _trim_log(self) -> None:
         """日志超过配置大小时，按每条记录的“记录时间”清理过期记录。
@@ -249,21 +261,13 @@ class Grader:
 
     def _append_run_header(self, *, stage: str, reports_dir: str | Path,
                            template: str | Path, output: str | Path | None) -> None:
-        """追加本次运行头。"""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
             _SEP_EQ,
-            "GradeHelper 运行日志",
-            f"记录时间: {now}",
-            f"运行开始: {now}",
-            f"执行阶段: {stage}",
-            f"报告目录: {reports_dir}",
-            f"评分模板: {template}",
+            _LOG_TITLE,
+            _SEP_EQ,
         ]
-        if output:
-            lines.append(f"结果文件: {output}")
-        lines.extend([_SEP_EQ, ""])
         self._append_log("\n".join(lines) + "\n")
+
 
     def _append_run_footer(self, *, start_dt: datetime, elapsed: float,
                            error: str | None) -> None:
@@ -287,7 +291,10 @@ class Grader:
                            elapsed: float, error: str | None,
                            extra: dict[str, str] | None = None,
                            title_report: ParsedReport | None = None,
-                           document: str = "") -> StageLogEntry:
+                           document: str = "",
+                           reports_dir: str | Path | None = None,
+                           template: str | Path | None = None,
+                           output: str | Path | None = None) -> StageLogEntry:
         """构造阶段日志记录；标题取第一份报告的课程/系部专业/报告名。"""
         first = title_report or (reports[0] if reports else None)
         start_report = reports[0] if reports else first
@@ -311,6 +318,9 @@ class Grader:
             tag_dep=(first.tag_dep if first else "") or tag_dep,
             report_name=first.report_name if first else "",
             document=document,
+            reports_dir=str(reports_dir) if reports_dir is not None else "",
+            template=str(template) if template is not None else "",
+            output=str(output) if output is not None else "",
             extra=extras,
         )
 
@@ -342,33 +352,44 @@ class Grader:
         ))
 
     def _append_stage_log(self, entry: StageLogEntry) -> None:
-        """追加单个阶段日志块（阶段结束时调用，保证中途退出也已落盘）。"""
         if not entry.record_time:
             entry.record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.stage_logs.append(entry)
-        lines = [
-            entry.title,
-            f"记录时间: {entry.record_time}",
-            f"开始时间: {entry.start_time}",
-            f"结束时间: {entry.end_time}",
-            f"用时: {entry.duration_seconds:.2f} 秒",
-        ]
-        if entry.processed_count:
-            lines.append(f"共处理: {entry.processed_count} 份")
+        lines = [entry.title]
+        lines.append(f"\u6267\u884c\u9636\u6bb5: {entry.stage}")
+        if entry.reports_dir:
+            lines.append(f"\u62a5\u544a\u76ee\u5f55: {entry.reports_dir}")
+        if entry.template:
+            lines.append(f"\u8bc4\u5206\u6a21\u677f: {entry.template}")
+        if entry.output:
+            lines.append(f"\u7ed3\u679c\u6587\u4ef6: {entry.output}")
         if entry.start_student_id:
-            lines.append(f"开始学号: {entry.start_student_id}")
+            lines.append(f"\u5f00\u59cb\u5b66\u53f7: {entry.start_student_id}")
         if entry.end_student_id:
-            lines.append(f"结束学号: {entry.end_student_id}")
+            lines.append(f"\u7ed3\u675f\u5b66\u53f7: {entry.end_student_id}")
+        lines.append(f"\u8fd0\u884c\u5f00\u59cb: {entry.start_time}")
+        lines.append(f"\u7ed3\u675f\u65f6\u95f4: {entry.end_time}")
+        lines.append(f"\u7528\u65f6: {entry.duration_seconds:.2f} \u79d2")
+        if entry.processed_count:
+            lines.append(f"\u5171\u5904\u7406: {entry.processed_count} \u4efd")
         for key, value in entry.extra.items():
+            if key == "\u7ed3\u679c\u6587\u4ef6":
+                continue
             lines.append(f"{key}: {value}")
         if entry.error:
-            lines.append(f"状态: 失败 - {entry.error}")
+            lines.append(f"\u72b6\u6001: \u5931\u8d25 - {entry.error}")
         else:
-            lines.append("状态: 成功")
-        lines.extend([_SEP_DASH, ""])
+            lines.append("\u72b6\u6001: \u6210\u529f")
         self._append_log("\n".join(lines) + "\n")
 
-    # ------------------------------------------------------------------ 结果文件路径
+
+    @staticmethod
+    def _format_result_name(fmt: str, course: str, tag_dep: str, report_name: str) -> str:
+        """按 result_name_format 生成结果文件名，并清理非法文件名字符。"""
+        name = fmt.format(course=course, tagDep=tag_dep or "系部专业",
+                          reportName=report_name)
+        # 禁止路径分隔符等非法文件名字符，确保结果文件与模板同目录
+        return re.sub(r'[\\/:*?"<>|]', "_", name)
 
     def _resolve_result_path(self, template: str | Path,
                              reports: list[ParsedReport],
@@ -391,11 +412,69 @@ class Grader:
         report_names = {r.report_name for r in reports}
         if len(courses) > 1 or len(report_names) > 1:
             logger.warning("报告目录包含多个课程/报告类型，结果文件名取第一份: %s", first.base_name)
-        name = fmt.format(course=first.course, tagDep=first.tag_dep,
-                          reportName=first.report_name)
-        # 禁止路径分隔符等非法文件名字符，确保结果文件与模板同目录
-        name = re.sub(r'[\\/:*?"<>|]', "_", name)
+        name = self._format_result_name(fmt, first.course, first.tag_dep, first.report_name)
         return Path(template).parent / name
+
+    def _resolve_result_path_hint(self, template: str | Path,
+                                  reports_dir: str | Path | None,
+                                  output: str | Path | None = None,
+                                  tag_dep: str = "系部专业") -> Path | None:
+        """阶段开始前估算结果文件路径（不解析 docx/md 正文）。
+
+        与 _resolve_result_path 使用同一命名规则，仅依据文件名推断课程与报告名：
+        - 显式 output（--output / paths.output）优先；
+        - 否则扫描报告目录，取第一份符合命名格式的 docx（没有则退化为 .md）；
+        - 无法推断（无报告、目录不存在或未配置 result_name_format）时返回 None。
+        """
+        output = output or (self.config.paths.output or "").strip() or None
+        if output:
+            return Path(output)
+        fmt = (self.config.paths.result_name_format or "").strip()
+        if not fmt or reports_dir is None:
+            return None
+        root = Path(reports_dir)
+        name_format = self.config.paths.report_name_format
+        separator = self.config.paths.report_name_separator
+        candidates: list[Path] = []
+        try:
+            candidates = scan_reports(root, name_format=name_format, separator=separator)
+        except OSError:
+            candidates = []
+        if not candidates:
+            # 只跑了 pic/sen 时目录里可能只剩 md（docx 已被移走）
+            try:
+                candidates = sorted(root.glob("*.md"))
+            except OSError:
+                candidates = []
+        for path in candidates:
+            meta = parse_filename(path, name_format=name_format, separator=separator,
+                                  suffixes=(path.suffix.lower(),))
+            if meta is not None:
+                course, _klass, _sid, _name, report_name = meta
+                return Path(template).parent / self._format_result_name(
+                    fmt, course, tag_dep, report_name)
+        return None
+
+    @staticmethod
+    def _ensure_result_writable(result_path: str | Path | None) -> None:
+        """doc / sen 阶段开始前检查结果文件是否被其它程序占用。
+
+        结果文件不存在（首次运行）视为可写；存在时尝试以读写方式打开：
+        被其它程序独占（Windows 下 Excel 打开 xlsx 会拒绝写入）时抛 RuntimeError，
+        由 CLI 提示后退出（退出码 1），该阶段不做任何解析与评分。
+        """
+        if result_path is None:
+            return
+        path = Path(result_path)
+        if not path.exists():
+            return
+        try:
+            with path.open("r+b"):
+                pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"结果文件无法写入，可能已被其它程序（如 Excel）打开，请关闭后重试: {path}"
+            ) from exc
 
     # ------------------------------------------------------------------ 阶段 1：doc（解析 + 程序规则打分）
 
@@ -413,6 +492,7 @@ class Grader:
         result_path: Path | None = None
         warning_count = 0
         doc_failed = 0
+        claim: ResultFileClaim | None = None
 
         def _on_parse_error(path: Path, exc: Exception) -> None:
             """单份文档解析失败：按具体文件名追加失败记录。"""
@@ -431,6 +511,13 @@ class Grader:
             )
 
         try:
+            # 结果文件被 Excel 等程序占用时立即提示退出，不做解析与评分；
+            # 随后独占占用该文件：运行期间其它程序（如 Excel）只能只读打开，
+            # 避免跑到最后写表时才发现文件被锁
+            hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
+            self._ensure_result_writable(hint)
+            claim = ResultFileClaim(hint)
+            claim.acquire()
             logger.info("【阶段 doc】解析报告目录: %s", reports_dir)
             reports = parse_all(
                 reports_dir,
@@ -442,12 +529,13 @@ class Grader:
             if not reports:
                 raise RuntimeError(f"目录中没有符合命名格式的报告: {reports_dir}")
 
-            # 移除被 skip 的图片（不保存图片文件）及其占位符，保持剩余图片原始编号
+            # 移除被 skip 的图片（不保存图片文件）及其占位符，保持剩余图片原始编号；
+            # 解析出的 md 同步去除空行（落盘与后续阶段使用同一份内容）
             for report in reports:
                 before = len(report.images)
                 report.images = [img for img in report.images if img.index > skip_images]
-                for skip_idx in range(1, skip_images + 1):
-                    report.md_text = report.md_text.replace(f"[[PIC:P{skip_idx}]]", "")
+                report.md_text = strip_blank_lines(
+                    remove_skipped_placeholders(report.md_text, skip_images))
                 logger.info("  已解析 %s（图片 %d 张，跳过前 %d 张，剩余 %d 张）",
                             report.base_name, before, skip_images, len(report.images))
 
@@ -473,7 +561,9 @@ class Grader:
 
             # 写入独立结果文件的 result 表（按学号匹配：存在则更新，不存在则添加；不修改模板）
             result_path = self._resolve_result_path(template, reports, output)
-            write_results(result_path, reports, rule_items, scores, mode="upsert")
+            claim.retarget(result_path)  # 推断出的结果文件与预设路径不同时补占用
+            write_results_atomic(result_path, reports, rule_items, scores,
+                                 mode="upsert", claim=claim)
             logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（LLM 项已预置 0），耗时 %.2f 秒",
                         result_path, time.perf_counter() - t0)
             return result_path
@@ -481,6 +571,8 @@ class Grader:
             error = str(exc) or exc.__class__.__name__
             raise
         finally:
+            if claim is not None:
+                claim.release()  # 阶段结束（成功或失败）都必须释放独占句柄
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
             extra: dict[str, str] = {}
@@ -503,6 +595,9 @@ class Grader:
                 elapsed=elapsed,
                 error=error,
                 extra=extra,
+                reports_dir=reports_dir,
+                template=template,
+                output=result_path,
             ))
 
     # ------------------------------------------------------------------ 阶段 2：pic（vllm 图片识别 + 更新 md）
@@ -521,6 +616,9 @@ class Grader:
         caption_enabled = False
         caption_failed = 0
         load_failed = 0
+        # 实时回写中写盘失败的项（逐项记录，阶段结束汇总，可重跑 pic 补齐）
+        caption_write_failed: list[str] = []
+        md_write_failed: dict[str, str] = {}
 
         def _on_load_error(path: Path, exc: Exception) -> None:
             """单份 md 加载失败：追加具体文档的失败记录。"""
@@ -558,14 +656,64 @@ class Grader:
             if not reports:
                 raise RuntimeError(f"目录中没有找到已保存的 md 文件: {reports_dir}")
 
+            # 原始 md：实时回写时始终从它重新嵌入描述，避免重复嵌入
+            base_md: dict[str, str] = {report.student_id: report.md_text for report in reports}
+
+            def _embed_and_save(report: ParsedReport) -> None:
+                """把当前已识别的描述嵌入 md 并落盘（可重复调用，不会重复嵌入）。"""
+                report.md_text = embed_captions(
+                    base_md[report.student_id], report.images,
+                    cfg.prompts.image_context, base_name=report.base_name)
+                (Path(report.source_path).parent / f"{report.base_name}.md").write_text(
+                    report.md_text, encoding="utf-8")
+
+            def _on_caption_batch(items: list[tuple[ParsedReport, ReportImage]]) -> None:
+                """按 batch_size 实时回写：图片描述 txt + 涉及的 md，无需等整阶段结束。
+
+                写盘失败逐项记录（不影响同批其他图片/报告），阶段结束统一汇总提示。
+                """
+                nonlocal saved_txt
+                touched: dict[str, ParsedReport] = {}
+                for report, image in items:
+                    try:
+                        if save_caption_txt(report, image,
+                                            cfg.paths.captions_dir or None) is not None:
+                            saved_txt += 1
+                    except Exception as exc:  # noqa: BLE001 写盘失败只记录，不中断识图
+                        reason = str(exc) or exc.__class__.__name__
+                        caption_write_failed.append(
+                            f"{report.base_name}-P{image.index}.txt: {reason}")
+                        logger.error("【阶段 pic】描述写盘失败 %s-P%d: %s",
+                                     report.base_name, image.index, exc)
+                        self._append_failure_entry(
+                            stage="pic", error=f"描述写盘失败: {reason}", report=report,
+                            extra={"图片": f"P{image.index}", "环节": "写盘"})
+                    touched[report.student_id] = report
+                for report in touched.values():
+                    try:
+                        _embed_and_save(report)
+                    except Exception as exc:  # noqa: BLE001 写盘失败只记录，不中断识图
+                        reason = str(exc) or exc.__class__.__name__
+                        md_write_failed[report.base_name] = reason
+                        logger.error("【阶段 pic】md 回写失败 %s: %s", report.base_name, exc)
+                        self._append_failure_entry(
+                            stage="pic", error=f"md 回写失败: {reason}", report=report,
+                            extra={"环节": "写盘"})
+                    else:
+                        md_write_failed.pop(report.base_name, None)
+                logger.debug("【阶段 pic】实时回写 %d 张图片描述（累计 %d 个 txt）",
+                             len(items), saved_txt)
+
             llm_rules_flag = any(r.is_llm for r in read_rules(template))
             if llm_rules_flag:
                 caption_enabled = True
-                logger.info("【阶段 pic】vllm 批量识别图片")
+                logger.info("【阶段 pic】vllm 批量识别图片（每 %d 张实时回写）",
+                            max(1, cfg.vllm.batch_size))
                 try:
                     caption_done = caption_images(
                         reports, cfg.vllm, cfg.prompts.image_prompt,
                         cancel=self.cancel_token, on_error=_on_caption_error,
+                        on_batch=_on_caption_batch,
                     )
                 except BaseException:
                     # 先停掉在飞的生成，再保留已识别成功的描述
@@ -575,15 +723,17 @@ class Grader:
                     saved_txt = save_captions_txt(reports, cfg.paths.captions_dir or None)
                     logger.warning("【阶段 pic】已中断，已保存 %d 张已识别图片描述", saved_txt)
                     raise
-                saved_txt = save_captions_txt(reports, cfg.paths.captions_dir or None)
-                logger.info("  图片描述已另存 %d 个 txt", saved_txt)
-            for report in reports:
-                report.md_text = embed_captions(report.md_text, report.images,
-                                                cfg.prompts.image_context,
-                                                base_name=report.base_name)
+                logger.info("  图片描述已按批另存 %d 个 txt", saved_txt)
 
-            # 保存更新后的 md（带图片描述）
-            self._save_parsed(reports)
+            if caption_write_failed or md_write_failed:
+                logger.error(
+                    "【阶段 pic】%d 张描述 / %d 份 md 写盘失败（其余已按批回写），"
+                    "可重跑 --stage pic 补齐",
+                    len(caption_write_failed), len(md_write_failed))
+                for line in caption_write_failed:
+                    logger.error("  %s", line)
+                for name, reason in md_write_failed.items():
+                    logger.error("  %s.md: %s", name, reason)
             logger.info("【阶段 pic】完成，图片描述已嵌入 md 并落盘，耗时 %.2f 秒",
                         time.perf_counter() - t0)
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
@@ -594,6 +744,7 @@ class Grader:
             elapsed = time.perf_counter() - t0
             caption_total = sum(len(report.images) for report in reports)
             extra: dict[str, str] = {"图片总数": f"{caption_total} 张"}
+            extra["并发"] = f"{max(1, cfg.vllm.batch_size)} 线程"
             if caption_enabled:
                 extra["识别成功"] = f"{caption_done} 张"
                 if caption_failed:
@@ -606,6 +757,9 @@ class Grader:
                 extra["加载失败"] = f"{load_failed} 个文档"
             if saved_txt:
                 extra["描述 txt"] = f"{saved_txt} 个"
+            if caption_write_failed or md_write_failed:
+                extra["写盘失败"] = (f"{len(caption_write_failed)} 张 txt / "
+                                    f"{len(md_write_failed)} 份 md")
             extra["跳过图片"] = f"前 {skip_images} 张"
             self._append_stage_log(self._build_stage_entry(
                 stage="pic",
@@ -616,6 +770,8 @@ class Grader:
                 elapsed=elapsed,
                 error=error,
                 extra=extra,
+                reports_dir=reports_dir,
+                template=template,
             ))
 
     # ------------------------------------------------------------------ 阶段 3：sen（llm 语义评分 + 更新 result 表）
@@ -638,6 +794,14 @@ class Grader:
         completed_reports: list[ParsedReport] = []
         load_failed = 0
         failed_report: ParsedReport | None = None
+        claim: ResultFileClaim | None = None
+        # 每完成 batch_size 份报告就把已完成评分回写结果文件（中断也不丢已完成部分）
+        checkpoint_every = max(1, cfg.llm.batch_size)
+        # 实时回写失败后的“冷却”位置：再多完成一批才重试，避免每批都卡在重试上
+        checkpoint_retry_at = 0
+        checkpoint_failures = 0
+        # 无 LLM 评分项时分数不会变化，跳过结尾的冗余写表
+        write_needed = True
 
         def _on_load_error(path: Path, exc: Exception) -> None:
             """单份 md 加载失败：追加具体文档的失败记录。"""
@@ -657,6 +821,12 @@ class Grader:
             )
 
         try:
+            # 结果文件被 Excel 等程序占用时立即提示退出，不做评分与写表；
+            # 随后独占占用该文件：运行期间其它程序（如 Excel）只能只读打开
+            hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
+            self._ensure_result_writable(hint)
+            claim = ResultFileClaim(hint)
+            claim.acquire()
             # 读取评分要求（rule 表仍来自模板）
             rule_items = read_rules(template)
             llm_rules = [r for r in rule_items if r.is_llm]
@@ -668,9 +838,10 @@ class Grader:
 
             # 独立结果文件路径（与 doc 阶段同一解析逻辑，读写同一文件）
             result_path = self._resolve_result_path(template, reports, output)
+            claim.retarget(result_path)  # 推断出的结果文件与预设路径不同时补占用
 
             # 读取结果文件中已存在的所有评分（不限 LLM 项，避免覆盖程序化规则分数）
-            existing_scores = read_result_scores(result_path)  # 读取全部评分列
+            existing_scores = read_result_items(result_path)  # 读取全部评分列
 
             if not llm_rules:
                 logger.info("【阶段 sen】无 LLM 评分项，沿用已有分数")
@@ -678,11 +849,14 @@ class Grader:
                     sid = report.student_id
                     row: dict[str, ItemScore] = {}
                     for rule in rule_items:
-                        prev = existing_scores.get(sid, {}).get(rule.key, 0.0)
-                        row[rule.key] = ItemScore(key=rule.key, score=prev,
-                                                  confidence=None, comment="")
+                        prev_item = existing_scores.get(sid, {}).get(rule.key)
+                        prev_score = prev_item.score if isinstance(prev_item, ItemScore) else (prev_item or 0.0)
+                        prev_comment = prev_item.comment if isinstance(prev_item, ItemScore) else ""
+                        row[rule.key] = ItemScore(key=rule.key, score=prev_score,
+                                                  confidence=None, comment=prev_comment)
                     final_scores[sid] = row
                 completed_reports = list(reports)
+                write_needed = False  # 分数未变化，结果文件不需要重新写
             else:
                 # sen 阶段前置检查：result 表表头必须与当前规则完全匹配，
                 # 不匹配则报错退出，不进行任何 LLM 提交。
@@ -707,6 +881,21 @@ class Grader:
                         f"现有表头：{existing_header}"
                     )
 
+                # 学号覆盖检查：sen 只更新 result 表中已有的行（strict 不新增行），
+                # 缺学号的报告必然在写表时失败，提前在这里报错退出，避免白跑一遍 LLM。
+                missing_ids = [report.student_id for report in reports
+                               if str(report.student_id).strip() not in existing_scores]
+                if missing_ids:
+                    shown = "、".join(missing_ids[:10])
+                    if len(missing_ids) > 10:
+                        shown += f" 等 {len(missing_ids)} 个"
+                    raise RuntimeError(
+                        f"sen 阶段：{len(missing_ids)} 份报告的学号不在结果文件 result 表中，"
+                        "程序退出，未进行 LLM 提交（请先执行 doc 阶段生成结果文件）。\n"
+                        f"结果文件：{result_path}\n"
+                        f"缺少学号：{shown}"
+                    )
+
                 logger.info("【阶段 sen】LLM 评分项批量评估（每份报告一次提交 %d 项），并发 %d",
                             len(llm_rules), max(1, cfg.llm.batch_size))
                 client = LLMClient(cfg.llm, cancel=self.cancel_token)
@@ -721,8 +910,10 @@ class Grader:
                             row: dict[str, ItemScore] = {}
                             for rule in rule_items:
                                 if not rule.is_llm:
-                                    prev = existing_scores.get(sid, {}).get(rule.key, 0.0)
-                                    row[rule.key] = ItemScore(key=rule.key, score=prev, comment="")
+                                    prev_item = existing_scores.get(sid, {}).get(rule.key)
+                                    prev_score = prev_item.score if isinstance(prev_item, ItemScore) else (prev_item or 0.0)
+                                    prev_comment = prev_item.comment if isinstance(prev_item, ItemScore) else ""
+                                    row[rule.key] = ItemScore(key=rule.key, score=prev_score, comment=prev_comment)
                             batch_scores = self._grade_with_llm_batch(client, report, llm_rules)
                             for rule in llm_rules:
                                 row[rule.key] = batch_scores[rule.key]
@@ -749,6 +940,23 @@ class Grader:
                             final_scores[report.student_id] = row
                             completed_reports.append(report)
                             logger.debug("【阶段 sen】已完成 ID %s", report.student_id)
+                            if (len(completed_reports) % checkpoint_every == 0
+                                    and len(completed_reports) >= checkpoint_retry_at):
+                                # 实时回写：中断/崩溃时最多只丢最后不足一批的结果
+                                try:
+                                    write_results_atomic(
+                                        result_path, completed_reports, rule_items,
+                                        final_scores, mode="strict", claim=claim)
+                                    logger.info("【阶段 sen】实时回写 %d/%d 份评分 → %s",
+                                                len(completed_reports), len(reports),
+                                                result_path)
+                                except Exception as save_exc:  # noqa: BLE001 回写失败不终止评分
+                                    checkpoint_failures += 1
+                                    # 冷却一批再试：一次瞬时占用不至于让整个阶段退化为只在结束时写
+                                    checkpoint_retry_at = len(completed_reports) + checkpoint_every
+                                    logger.warning(
+                                        "【阶段 sen】实时回写失败（将在下一批后重试，"
+                                        "结束时会再写一次）: %s", save_exc)
                     except BaseException:
                         # 任一报告失败/用户中断：立刻停止其余在飞请求，由外层统一保存已完成结果
                         self.cancel()
@@ -758,18 +966,26 @@ class Grader:
                         pool.shutdown(wait=True)
 
             # 汇总写入独立结果文件的 result 表（按学号匹配：存在则更新，不存在则报错退出）
-            out = write_results(result_path, reports, rule_items, final_scores, mode="strict")
-            logger.info("【阶段 sen】完成，最终评分已写入: %s，耗时 %.2f 秒", out,
-                        time.perf_counter() - t0)
+            if write_needed:
+                out = write_results_atomic(result_path, reports, rule_items, final_scores,
+                                           mode="strict", claim=claim)
+                logger.info("【阶段 sen】完成，最终评分已写入: %s，耗时 %.2f 秒", out,
+                            time.perf_counter() - t0)
+            else:
+                out = result_path
+                logger.info("【阶段 sen】无 LLM 评分项，结果文件无需更新: %s，耗时 %.2f 秒",
+                            out, time.perf_counter() - t0)
             return out
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt
             error = str(exc) or exc.__class__.__name__
             # 中断/失败：先停掉在飞生成，再保存已经完整拿到结果的报告
             self.cancel()
-            if completed_reports and result_path is not None and rule_items:
+            if (write_needed and completed_reports and result_path is not None
+                    and rule_items):
                 try:
-                    out = write_results(result_path, completed_reports,
-                                        rule_items, final_scores, mode="strict")
+                    out = write_results_atomic(result_path, completed_reports,
+                                               rule_items, final_scores, mode="strict",
+                                               claim=claim)
                     logger.warning(
                         "【阶段 sen】已中断（%s）：已保存 %d/%d 份完整评分 → %s",
                         error, len(completed_reports), len(reports), out,
@@ -778,6 +994,8 @@ class Grader:
                     logger.error("【阶段 sen】保存已完成评分失败: %s", save_exc)
             raise
         finally:
+            if claim is not None:
+                claim.release()  # 阶段结束（成功或失败）都必须释放独占句柄
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
             extra: dict[str, str] = {
@@ -794,6 +1012,8 @@ class Grader:
             if result_path:
                 extra["结果文件"] = str(result_path)
             extra["跳过图片"] = f"前 {skip_images} 张"
+            if checkpoint_failures:
+                extra["实时回写"] = f"失败 {checkpoint_failures} 次"
             self._append_stage_log(self._build_stage_entry(
                 stage="sen",
                 reports=reports,
@@ -803,6 +1023,9 @@ class Grader:
                 elapsed=elapsed,
                 error=error,
                 extra=extra,
+                reports_dir=reports_dir,
+                template=template,
+                output=result_path,
                 title_report=failed_report,
                 document=(failed_report.base_name if failed_report is not None else ""),
             ))
@@ -850,10 +1073,8 @@ class Grader:
             run_error = str(exc) or exc.__class__.__name__
             raise
         finally:
-            # 阶段日志已在各阶段结束时增量追加；这里只补运行尾
-            self._append_run_footer(start_dt=run_start_dt,
-                                    elapsed=time.perf_counter() - run_t0,
-                                    error=run_error)
+            # no footer appended
+            pass
 
     # ------------------------------------------------------------------ 从磁盘加载报告（供 pic 阶段使用，不重新解析 word）
 
@@ -867,7 +1088,7 @@ class Grader:
         再从 md 中提取 [[PIC:文件名]] 占位符中的完整图片文件名，
         直接读取对应图片文件。on_error 用于记录单份 md 加载失败。
         """
-        from .parser import parse_filename, PIC_PATTERN
+        from .parser import parse_filename, PIC_PATTERN, remove_skipped_placeholders
         reports: list[ParsedReport] = []
         name_format = self.config.paths.report_name_format
         separator = self.config.paths.report_name_separator
@@ -882,6 +1103,8 @@ class Grader:
                 course, klass, student_id, std_name, report_name = meta
 
                 md_text = md_path.read_text(encoding="utf-8")
+                # 被跳过图片的占位符不进入后续阶段（兼容旧版 doc 阶段产出的 md）
+                md_text = remove_skipped_placeholders(md_text, skip_images)
 
                 # 从 md 中提取所有 [[PIC:文件名]] 占位符，直接获取图片文件名
                 pic_files = PIC_PATTERN.findall(md_text)
@@ -935,16 +1158,9 @@ class Grader:
         失败不自行捕获，异常向上抛出。client.chat_json 内部已按 cfg.max_retries
         重试，耗尽后会抛出 RuntimeError，由 stage_sen / main 决定退出程序。
         """
-        items_section: list[str] = []
-        for rule in llm_rules:
-            lo, hi = rule.score_range()
-            score_range = f"{lo:g}-{hi:g}" if lo is not None and hi is not None else "按评分标准"
-            items_section.append(f"- {rule.key}：{rule.evaluation}，分数范围 {score_range}。")
-        items_text = "\n".join(items_section)
-
-        prompt = self.config.prompts.llm_batch.format(
-            items_section=items_text, report=report.md_text,
-        )
+        items_text = build_llm_items_section(llm_rules)
+        prompt = render_llm_batch_prompt(
+            self.config.prompts.llm_batch, items_text, report.md_text)
         data = client.chat_json([{"role": "user", "content": prompt}])
 
         result: dict[str, ItemScore] = {}
@@ -980,3 +1196,26 @@ def _to_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+
+def build_llm_items_section(llm_rules: list[RuleItem]) -> str:
+    """评分项列表：每行“- 评分项编号；分数范围；评分标准”。"""
+    lines: list[str] = []
+    for rule in llm_rules:
+        lo, hi = rule.score_range()
+        score_range = f"{lo:g}-{hi:g}" if lo is not None and hi is not None else "按评分标准"
+        lines.append(f"- {rule.key}；{score_range}；{rule.evaluation}")
+    return "\n".join(lines)
+
+
+def render_llm_batch_prompt(template: str, items_section: str, report_md: str) -> str:
+    """渲染 llm_batch Prompt，只替换约定的 {items_section} 与 {report} 占位符。
+
+    模板中的其他花括号（如输出示例 {"score": ...}）必须原样保留，
+    因此不能使用 str.format()；先替换 {items_section} 再替换 {report}，
+    避免报告正文中的字面占位符被二次替换。
+    """
+    return (template
+            .replace("{items_section}", items_section)
+            .replace("{report}", report_md))

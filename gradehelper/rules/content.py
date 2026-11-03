@@ -74,6 +74,8 @@ def window_similarity(text: str, pattern: str, threshold: float = 0.9,
     """text 中是否存在长度相近的滑动窗口，与 pattern 的相似度 >= threshold。
 
     max_start_ratio 限定窗口起点须落在文本前该比例内（用于“报告前半部分”语义）。
+    逐位置精确扫描（用 quick_ratio 预筛保证性能），避免固定步长网格因文本长度整体
+    平移（例如 doc 阶段去除空行、移除跳过图片的占位符）而漏掉实际存在的匹配窗口。
     """
     pat = re.sub(r"\s+", "", pattern)
     if not pat:
@@ -85,10 +87,12 @@ def window_similarity(text: str, pattern: str, threshold: float = 0.9,
     if n <= m:
         return difflib.SequenceMatcher(None, compact, pat).ratio() >= threshold
     max_start = max(0, int(n * max_start_ratio))
-    step = max(1, m // 10)
-    for start in range(0, min(n - m + 1, max_start + 1), step):
-        window = compact[start:start + m]
-        if difflib.SequenceMatcher(None, window, pat).ratio() >= threshold:
+    limit = min(n - m + 1, max_start + 1)
+    for start in range(limit):
+        matcher = difflib.SequenceMatcher(None, compact[start:start + m], pat)
+        if matcher.quick_ratio() < threshold:  # quick_ratio 是 ratio 的上界，可安全跳过
+            continue
+        if matcher.ratio() >= threshold:
             return True
     return False
 
@@ -104,20 +108,33 @@ def _last_section(report: ParsedReport, ratio: float = 0.2) -> str:
     return tail
 
 
+DOCKER_KEYWORDS = ("docker", "容器", "container", "镜像", "image")
+NOSQL_KEYWORDS = ("nosql", "mongodb", "sqlite", "hbase", "非关系型数据库",
+                  "文档数据库", "列存储", "键值")
+
+
+def _match_keyword(text: str, keywords: tuple) -> str:
+    """大小写不敏感的关键字匹配，返回命中的第一个关键字；未命中返回空串。"""
+    low = text.lower()
+    for kw in keywords:
+        if kw.lower() in low:
+            return kw
+    return ""
+
+
 def summary_docker(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """最后总结部分包含 docker 则加分。"""
-    tail = _last_section(report)
-    if re.search(r"docker", tail, re.IGNORECASE):
+    """最后总结部分涉及 Docker 相关内容（任一关键字命中）则加分。"""
+    hit = _match_keyword(_last_section(report), DOCKER_KEYWORDS)
+    if hit:
         score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"总结部分涉及重点内容 docker，+{score:g}分。"
-    return 0.0, "总结部分未涉及 docker，不加分。"
+        return score, rule.comment or f"总结部分涉及 Docker 相关内容（命中“{hit}”），+{score:g}分。"
+    return 0.0, "总结部分未涉及 Docker 相关内容，不加分。"
 
 
 def summary_sql(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """最后总结部分包含 NoSQL/MongoDB/SQLite/hbase 任意一项则加分。"""
-    tail = _last_section(report)
-    hit = [kw for kw in ("NoSQL", "MongoDB", "SQLite", "HBase", "hbase") if kw.lower() in tail.lower()]
+    """最后总结部分涉及 NoSQL 相关内容（任一关键字命中）则加分。"""
+    hit = _match_keyword(_last_section(report), NOSQL_KEYWORDS)
     if hit:
         score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"总结部分涉及重点内容{hit[0]}，+{score:g}分。"
+        return score, rule.comment or f"总结部分涉及 NoSQL 相关内容（命中“{hit}”），+{score:g}分。"
     return 0.0, "总结部分未涉及 NoSQL 相关内容，不加分。"

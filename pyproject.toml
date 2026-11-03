@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gradehelper"
-version = "0.1.0"
+dynamic = ["version"]
 description = "课程报告自动化评分系统（docling 解析 + 规则引擎 + LLM 评估）"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,3 +20,6 @@ gradehelper = "gradehelper.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["gradehelper*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gradehelper.__version__" }
