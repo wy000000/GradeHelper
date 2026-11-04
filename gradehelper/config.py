@@ -64,6 +64,10 @@ class PathsConfig:
     log_name_format: str = "{course}-{tagDep}-{reportName}.log"  # 日志文件名格式
     log_max_size_kb: int = 32       # 日志超过该大小（KB）才清理旧记录；0 表示不清理
     log_retention_days: float = 1.0  # 日志记录保留天数；0 表示不清理
+    # 单文件处理并发数（doc 解析/落盘，以及 pic/sen 加载 md）
+    parse_workers: int = 4
+    # 单文件失败后的额外重试轮数；0 表示不重试
+    retry_rounds: int = 1
     # 报告文件命名格式（用于解析文件名提取课程/班级/学号/姓名/报告名）
     report_name_format: str = ""
     report_name_separator: str = ""

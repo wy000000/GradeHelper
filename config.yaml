@@ -8,7 +8,7 @@ endpoints:
       api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
-      max_retries: 3       # LLM 端点的失败重试次数配置。
+      max_retries: 1       # LLM 端点的失败重试次数配置。
       batch_size: 4        # sen 阶段并发提交的报告数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       model: "qwen35-thinking-coding"
@@ -29,7 +29,7 @@ endpoints:
       api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
-      max_retries: 3       # VLLM 端点的失败重试次数配置。
+      max_retries: 1       # VLLM 端点的失败重试次数配置。
       batch_size: 4        # 并发识别图片数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       model: "qwen35-thinking-coding"
@@ -54,6 +54,8 @@ paths:
   log_name_format: "{course}-{tagDep}-{reportName}.log"  # 运行日志文件名格式（与模板同目录）
   # log_max_size_kb: 32                             # 日志超过该大小（KB）才清理旧记录；0 表示不清理
   # log_retention_days: 1                           # 日志记录保留天数；0 表示不清理
+  parse_workers: 4                                # 单文件处理并发数（doc 解析/落盘、pic/sen 加载 md）
+  retry_rounds: 1                                 # 单文件失败后的额外重试轮数；0 表示不重试
   # 报告文件命名格式：字段模板与分隔符（用于从文件名解析 课程-班级-学号-姓名-报告名）
   report_name_format: "{course}-{klass}-{student_id}-{stdName}-{reportName}"
   report_name_separator: "-"

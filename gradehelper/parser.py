@@ -13,6 +13,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
+from .batch import run_file_batch
 from .models import ParsedReport, ReportImage
 
 logger = logging.getLogger(__name__)
@@ -402,25 +403,41 @@ def parse_all(
     separator: str = "-",
     tag_dep: str = "系部专业",
     on_error: Callable[[Path, Exception], None] | None = None,
+    workers: int = 1,
+    max_attempts: int = 2,
 ) -> list[ParsedReport]:
-    """扫描并解析目录下所有合规报告，解析结果全部驻留内存。
+    """扫描并多线程解析目录下所有合规报告，解析结果全部驻留内存。
 
-    on_error 会在单份文档解析失败时被调用（参数为文件路径与异常），
-    便于调用方把失败记录到运行日志；回调异常不会中断其余文档解析。
+    - 单份文档解析失败不会中断其它文档；
+    - 失败文件进入异常队列，全部解析完成后自动重试；
+    - 重试结束仍失败的文档通过 ``on_error`` 回调记录，其余文档照常返回。
+
+    ``on_error`` 只在重试结束后对最终仍失败的文档调用一次，
+    因此不会因重试产生重复的失败记录。
     """
-    reports = []
-    for path in scan_reports(reports_dir, name_format=name_format, separator=separator):
-        try:
-            reports.append(parse_report(path, name_format=name_format, separator=separator,
-                                        tag_dep=tag_dep))
-        except Exception as exc:
-            logger.error("解析失败 %s: %s", path.name, exc)
-            if on_error is not None:
-                try:
-                    on_error(path, exc)
-                except Exception:  # noqa: BLE001 记录失败不应影响解析流程
-                    logger.debug("解析失败回调异常", exc_info=True)
-    return reports
+    paths = scan_reports(reports_dir, name_format=name_format, separator=separator)
+
+    def _on_final_failure(failed) -> None:
+        logger.error("解析失败 %s: %s", failed.path.name, failed.reason)
+        if on_error is not None:
+            try:
+                on_error(failed.path, failed.error)
+            except Exception:  # noqa: BLE001 记录失败不应影响解析流程
+                logger.debug("解析失败回调异常", exc_info=True)
+
+    outcome = run_file_batch(
+        stage="doc",
+        items=paths,
+        worker=lambda path: parse_report(
+            path, name_format=name_format, separator=separator, tag_dep=tag_dep),
+        workers=max(1, int(workers)),
+        path_of=lambda path: path,
+        label_of=lambda path: path.name,
+        unit="份",
+        on_failure=_on_final_failure,
+        max_attempts=max_attempts,
+    )
+    return outcome.results
 
 
 def _caption_block_span(md: str, template: str, index: int) -> tuple[int, int] | None:

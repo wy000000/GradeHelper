@@ -89,6 +89,7 @@ python -m gradehelper --version   # 查看版本号
 | `full` | 同上 | 依次执行 `doc` → `pic` → `sen` | 同三个阶段 |
 
 - `pic` 仅在 `rule` 表存在 LLM 评分项时才识别图片；没有 LLM 项时跳过识图。
+- 三个阶段都按文件多线程处理（`paths.parse_workers`）：单份文档的解析、加载或保存失败只会进入异常队列，不会中断其它文档；整批处理完成后自动重试异常队列（`paths.retry_rounds`，默认再重试 1 轮），重试后仍失败的文件记录到运行日志并跳过。
 - 并发数来自配置：`pic` 用 `endpoints.vllm.client.batch_size`（并发识图数），`sen` 用 `endpoints.llm.client.batch_size`（并发报告数）。
 - `doc` / `sen` 阶段开始前会先检查结果 xlsx 能否写入：若文件已在其它程序中打开（如 Excel），立即提示“结果文件无法写入……”并以退出码 1 结束，该阶段不做解析与评分；结果文件不存在（首次运行）视为可写。
 - 结果 xlsx 的写入方式：`doc` 用 upsert（按学号匹配，存在则更新该行，不存在则追加新行）；`sen` 用 strict（只更新已有行，不会新增行）。`result` 表表头与当前处理规则不一致时，`doc` 会清空该表重建，`sen` 则在提交任何 LLM 请求之前报错退出。
@@ -183,6 +184,8 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 | `log_name_format` | `{course}-{tagDep}-{reportName}.log` | 运行日志文件名格式（与模板同目录） |
 | `log_max_size_kb` | `32` | 日志超过该大小（KB）才清理旧记录；`0` 表示不清理 |
 | `log_retention_days` | `1` | 日志记录保留天数；`0` 表示不清理 |
+| `parse_workers` | `4` | 单文件处理并发数（`doc` 解析/落盘，`pic`/`sen` 加载 md） |
+| `retry_rounds` | `1` | 单文件失败后的额外重试轮数；`0` 表示不重试 |
 | `report_name_format` | `{course}-{klass}-{student_id}-{stdName}-{reportName}` | 报告文件名解析格式，必须配置，否则所有报告都会被忽略 |
 | `report_name_separator` | `-` | 报告文件名分隔符 |
 | `result_name_format` | `{course}-{tagDep}-{reportName}-评分结果.xlsx` | 结果文件命名模式（与模板同目录，`评分结果` 为固定字符串） |

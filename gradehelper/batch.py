@@ -1,0 +1,222 @@
+"""通用文件批处理：多线程执行、失败入队、整批结束后自动重试。
+
+三个阶段（doc / pic / sen）统一使用本模块处理“按文件逐个解析、保存”的流程：
+
+- 每个文件独立执行，单个文件失败不会中断其它文件；
+- 失败文件进入异常队列（按文件路径去重）；
+- 一轮全部完成后，对异常队列中的文件再重试；
+- 重试结束仍有失败时只记录日志并返回，不影响已经成功的文件。
+
+``KeyboardInterrupt`` / ``LLMAborted`` 等中止信号不会入队，而是立即向上传播。
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Generic, TypeVar
+
+from .cancel import LLMAborted
+from .progress import ParallelProgress
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+# 这些异常表示“用户中止”，不计入异常队列，直接向上传播。
+_ABORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    KeyboardInterrupt,
+    LLMAborted,
+    SystemExit,
+    GeneratorExit,
+)
+
+
+@dataclass
+class FailedFile(Generic[T]):
+    """异常队列中的一个文件。"""
+
+    item: T
+    path: Path
+    error: BaseException
+    attempts: int
+
+    @property
+    def reason(self) -> str:
+        return str(self.error) or self.error.__class__.__name__
+
+
+class FailureQueue(Generic[T]):
+    """线程安全的异常队列：同一路径只保留最后一次失败。"""
+
+    def __init__(self) -> None:
+        self._items: dict[str, FailedFile[T]] = {}
+        self._lock = threading.Lock()
+
+    def add(self, item: T, path: Path, error: BaseException, attempts: int) -> None:
+        with self._lock:
+            self._items[str(path)] = FailedFile(item, path, error, attempts)
+
+    def discard(self, path: Path) -> None:
+        with self._lock:
+            self._items.pop(str(path), None)
+
+    def values(self) -> list[FailedFile[T]]:
+        with self._lock:
+            return list(self._items.values())
+
+    def drain(self) -> list[FailedFile[T]]:
+        with self._lock:
+            items = list(self._items.values())
+            self._items.clear()
+        return items
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+
+@dataclass
+class BatchOutcome(Generic[R]):
+    """一次批处理的结果：成功结果按输入顺序返回，失败文件保留在队列中。"""
+
+    results: list[R]
+    failures: FailureQueue
+
+
+def run_file_batch(
+    *,
+    stage: str,
+    items: Sequence[T],
+    worker: Callable[[T], R],
+    workers: int,
+    path_of: Callable[[T], Path],
+    label_of: Callable[[T], str] | None = None,
+    unit: str = "个文件",
+    on_failure: Callable[[FailedFile[T]], None] | None = None,
+    on_success: Callable[[R], None] | None = None,
+    max_attempts: int = 2,
+    progress_enabled: bool = True,
+) -> BatchOutcome[R]:
+    """多线程处理文件，失败入队并在整批结束后自动重试。
+
+    参数：
+    - ``stage``：阶段名，用于日志与进度显示（doc / pic / sen）；
+    - ``items``：待处理文件/报告列表；
+    - ``worker``：单文件处理函数；抛异常表示该文件失败；
+    - ``workers``：并发线程数；
+    - ``path_of``：从 item 取文件路径，异常队列用它去重；
+    - ``label_of``：进度显示用的简短标签；
+    - ``on_failure``：最终仍未成功的文件回调（每轮失败只在日志中提示，
+      避免同一文件产生多条失败记录）；
+    - ``on_success``：每个文件成功后立即回调（用于 sen 的实时回写）；
+    - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮。
+
+    返回成功结果（保持输入顺序）与最终异常队列。
+    """
+    total_attempts = max(1, int(max_attempts))
+    work = list(items)
+    if not work:
+        return BatchOutcome(results=[], failures=FailureQueue())
+
+    # 记录原始顺序，重试成功后仍按输入顺序返回结果
+    index_by_path = {str(path_of(item)): index for index, item in enumerate(work)}
+    results: dict[int, R] = {}
+    pending: list[tuple[int, T]] = list(enumerate(work))
+    failures: FailureQueue[T] = FailureQueue()
+
+    for attempt in range(1, total_attempts + 1):
+        if not pending:
+            break
+        failures = FailureQueue()
+        round_stage = stage if attempt == 1 else f"{stage}重试"
+        progress = ParallelProgress(
+            round_stage, len(pending), unit=unit,
+            workers=max(1, int(workers)), enabled=progress_enabled,
+        )
+        with progress:
+            pool = ThreadPoolExecutor(max_workers=max(1, int(workers)))
+            try:
+                futures = {}
+                for _index, item in pending:
+                    label = label_of(item) if label_of is not None else str(path_of(item))
+                    futures[pool.submit(_run_one, progress, worker, item, label)] = item
+                for future in as_completed(futures):
+                    item = futures[future]
+                    try:
+                        result = future.result()
+                    except _ABORT_EXCEPTIONS:
+                        raise
+                    except BaseException as exc:  # noqa: BLE001 单文件失败不影响其它文件
+                        path = path_of(item)
+                        failures.add(item, path, exc, attempt)
+                        logger.warning(
+                            "【阶段 %s】%s 处理失败（第 %d/%d 次）: %s",
+                            stage, _label(item, path_of, label_of), attempt,
+                            total_attempts, str(exc) or exc.__class__.__name__,
+                        )
+                        continue
+                    results[index_by_path[str(path_of(item))]] = result
+                    if on_success is not None:
+                        try:
+                            on_success(result)
+                        except _ABORT_EXCEPTIONS:
+                            raise
+                        except BaseException:  # noqa: BLE001 回调失败不应中断批处理
+                            logger.error("【阶段 %s】成功回调异常", stage, exc_info=True)
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
+
+        if not failures or attempt >= total_attempts:
+            break
+
+        logger.warning(
+            "【阶段 %s】本轮有 %d 个文件失败，开始第 %d/%d 轮重试（只重试异常队列）",
+            stage, len(failures), attempt + 1, total_attempts,
+        )
+        retry_items: list[tuple[int, T]] = []
+        for failed in failures.values():
+            index = index_by_path.get(str(failed.path))
+            if index is not None:
+                retry_items.append((index, failed.item))
+        pending = retry_items
+
+    if failures:
+        logger.error(
+            "【阶段 %s】重试结束，仍有 %d 个文件失败（已跳过，其余文件处理完成）",
+            stage, len(failures),
+        )
+        for failed in failures.values():
+            logger.error("  %s: %s", failed.path.name, failed.reason)
+        if on_failure is not None:
+            for failed in failures.values():
+                try:
+                    on_failure(failed)
+                except BaseException:  # noqa: BLE001 记录失败不应中断收尾流程
+                    logger.error("【阶段 %s】失败回调异常", stage, exc_info=True)
+
+    ordered = [results[index] for index in sorted(results)]
+    return BatchOutcome(results=ordered, failures=failures)
+
+
+def _label(item: T, path_of: Callable[[T], Path],
+           label_of: Callable[[T], str] | None) -> str:
+    return label_of(item) if label_of is not None else path_of(item).name
+
+
+def _run_one(progress: ParallelProgress, worker: Callable[[T], R],
+             item: T, label: str) -> R:
+    """在线程池中执行单个任务，并上报进度。"""
+    with progress.task(label):
+        return worker(item)
