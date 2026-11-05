@@ -33,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     stage = "doc"
     stage = "pic"
     stage = "sen"
-    # stage = "full"
+    stage = "full"
+    skip_images = 2
     
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
@@ -45,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="调试日志")
     parser.add_argument("--tagDep", default="系部专业",
                         help="系部专业标识，用于结果文件命名（默认：系部专业）")
-    parser.add_argument("--skip-images", type=int, default=2, help="解析时跳过前面 N 张图片（默认 2）")
+    parser.add_argument("--skip-images", type=int, default=skip_images, help="解析时跳过前面 N 张图片（默认 2）")
     parser.add_argument("--stage", choices=["doc", "pic", "sen", "full"], default=stage,
                         help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，sen=llm语义评分，full=全部（默认）")
     return parser

@@ -40,7 +40,7 @@ python -m gradehelper --version   # 查看版本号
 
 ### 参数总览
 
-| 分类 | 参数 | 取值 | 默认值 |
+| 分类 | 参数 | 取值 | 默认值(不准确，需设置) |
 | --- | --- | --- | --- |
 | 配置与信息 | `--config PATH` | 文件路径 | 项目根目录 `config.yaml` |
 | 配置与信息 | `-h, --help` | 开关 | — |
@@ -50,7 +50,7 @@ python -m gradehelper --version   # 查看版本号
 | 任务与路径 | `--output XLSX` | 文件 | `paths.output`；留空则按 `paths.result_name_format` 生成 |
 | 任务与路径 | `--tagDep NAME` | 字符串 | `系部专业` |
 | 流程控制 | `--stage STAGE` | `doc` / `pic` / `sen` / `full` | `full` |
-| 流程控制 | `--skip-images N` | 非负整数 | `2` |
+| 流程控制 | `--skip-images N` | 非负整数 | `0` |
 | 日志与诊断 | `-v, --verbose` | 开关 | 关闭（INFO 级别） |
 
 ### 1. 配置与信息类
