@@ -185,9 +185,9 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
 
     @staticmethod
     def _summary_extra(grader: Grader) -> dict[str, str]:
-        """取 pic 阶段汇总日志（带“图片总数”的那条）的 extra。"""
+        """取 pic 阶段汇总日志（带“文档”计数的那条）的 extra。"""
         entries = [entry for entry in grader.stage_logs
-                   if entry.stage == "pic" and "图片总数" in entry.extra]
+                   if entry.stage == "pic" and "文档" in entry.extra]
         assert entries, "缺少 pic 阶段汇总日志"
         return entries[-1].extra
 
@@ -195,6 +195,8 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
         reports = [_pic_report(self.tmp, sid) for sid in ("2021001", "2021002", "2021003")]
         bad = reports[1]
         grader = Grader(_config(batch=2))
+        grader.config.vllm.base_url = "http://vllm.test"
+        grader.config.vllm.model = "vlm-test"
         grader._load_reports_for_pic = lambda *args, **kwargs: reports
 
         def fake_save(report, image, captions_dir=None):
@@ -227,7 +229,13 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
         self.assertEqual(failures[0].extra.get("图片"), "P3")
         self.assertEqual(failures[0].extra.get("环节"), "写盘")
         # 阶段汇总：计数 + 提示可重跑
-        self.assertEqual(self._summary_extra(grader).get("写盘失败"), "1 张 txt / 0 份 md")
+        summary = self._summary_extra(grader)
+        self.assertEqual(summary.get("写盘失败"), "1 张 txt / 0 份 md")
+        self.assertEqual(summary.get("base_url"), "http://vllm.test")
+        self.assertEqual(summary.get("model"), "vlm-test")
+        self.assertEqual(summary.get("文档"), "处理 3 份 / 成功 3 份 / 失败 0 份")
+        self.assertEqual(summary.get("图片"), "处理 3 张 / 成功 2 张 / 失败 1 张")
+        self.assertEqual(grader.stage_logs[-1].failed_count, 1)
         self.assertTrue(any("描述写盘失败" in line for line in logs.output))
         self.assertTrue(any("可重跑 --stage pic 补齐" in line for line in logs.output))
 
@@ -278,6 +286,8 @@ class TestSenCheckpointWriteback(unittest.TestCase):
 
     def test_sen_writes_back_every_batch_size(self):
         grader = Grader(_config(batch=2))
+        grader.config.llm.base_url = "http://llm.test"
+        grader.config.llm.model = "llm-test"
         grader._load_reports_for_pic = lambda *args, **kwargs: list(self.reports)
         grader._grade_with_llm_batch = lambda client, report, llm_rules: {
             "event": ItemScore(key="event", score=12.0, confidence=0.9, comment="LLM 评语")
@@ -303,6 +313,11 @@ class TestSenCheckpointWriteback(unittest.TestCase):
             self.assertEqual(items[report.student_id]["event"].score, 12.0)
             self.assertEqual(items[report.student_id]["baseScore"].comment, "规则评语")
         self.assertEqual(list(self.tmp.glob("*.tmp*")), [])
+        entry = grader.stage_logs[-1]
+        self.assertEqual(entry.extra.get("base_url"), "http://llm.test")
+        self.assertEqual(entry.extra.get("model"), "llm-test")
+        self.assertEqual(entry.extra.get("报告"), "处理 4 份 / 成功 4 份 / 失败 0 份")
+        self.assertEqual(entry.failed_count, 0)
 
 
 class TestSenPreflight(unittest.TestCase):

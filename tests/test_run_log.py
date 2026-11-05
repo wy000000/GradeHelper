@@ -136,6 +136,52 @@ class TestAppendRunLog(unittest.TestCase):
         text = self._read()
         self.assertIn("状态: 失败 - 连接中断", text)
 
+    def test_partial_failure_status_and_counts(self):
+        entry = self.grader._build_stage_entry(
+            stage="doc", reports=[_report(student_id="2021001")], tag_dep="计算机系",
+            start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+            processed=2, succeeded=1, failed=1,
+        )
+        self.grader._append_stage_log(entry)
+        text = self._read()
+        self.assertIn("共处理: 2 份", text)
+        self.assertIn("成功: 1 份", text)
+        self.assertIn("失败: 1 份", text)
+        self.assertIn("状态: 部分失败 - 失败 1 条", text)
+
+    def test_all_failed_stage_status(self):
+        entry = self.grader._build_stage_entry(
+            stage="doc", reports=[_report(student_id="2021001")], tag_dep="计算机系",
+            start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+            processed=2, succeeded=0, failed=2,
+        )
+        self.grader._append_stage_log(entry)
+        self.assertIn("状态: 失败 - 2 条全部失败", self._read())
+
+    def test_run_footer_not_success_when_stage_has_failures(self):
+        entry = self.grader._build_stage_entry(
+            stage="doc", reports=[_report(student_id="2021001")], tag_dep="计算机系",
+            start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+            processed=2, succeeded=1, failed=1,
+        )
+        self.grader._append_stage_log(entry)
+        self.grader._append_run_footer(start_dt=self.start, elapsed=1.0, error=None)
+        self.assertIn("状态: 部分失败 - 共 1 条失败", self._read())
+
+    def test_intermediate_warnings_are_logged(self):
+        entry = self.grader._build_stage_entry(
+            stage="doc", reports=[_report(student_id="2021001")], tag_dep="计算机系",
+            start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+            warnings=["2021001.docx: 第 1 次解析失败，将重试: 临时错误",
+                      "2021001.docx: 未找到图片文件: P3.png"],
+        )
+        self.grader._append_stage_log(entry)
+        text = self._read()
+        self.assertIn("中间错误: 2 条", text)
+        self.assertIn("第 1 次解析失败，将重试: 临时错误", text)
+        self.assertIn("未找到图片文件: P3.png", text)
+        self.assertIn("状态: 成功（有警告）", text)
+
     def test_run_header_and_footer(self):
         self.grader._append_run_header(
             stage="full", reports_dir=self.tmp / "reports",

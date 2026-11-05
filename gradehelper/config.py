@@ -17,9 +17,10 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 class EndpointConfig:
     """OpenAI 兼容端点配置（llm 与 vllm 均使用此结构，全部来自 YAML）。"""
 
-    # ---- 客户端专用（来自 YAML 的 client 子区域，不会发送给 API）----
+    # ---- 客户端专用（来自 YAML 的 connection/client 子区域，不会发送给 API）----
     base_url: str = ""
     api_key: str = ""
+    model: str = ""               # 模型名（也兼容旧配置的 api.model）
     connect_timeout: int = 0      # TCP/TLS 连接超时（秒）
     read_timeout: int = 0         # 等待响应数据的超时（秒）
     max_retries: int = 0
@@ -33,13 +34,14 @@ class EndpointConfig:
     def from_dict(cls, data: dict[str, Any] | None) -> "EndpointConfig":
         cfg = cls()
         data = data or {}
-        # client 子区域：解析为 dataclass 字段
-        client_data = data.get("client") or {}
-        for key, value in client_data.items():
-            if key.startswith("_"):
-                continue
-            if hasattr(cfg, key):
-                setattr(cfg, key, value)
+        # connection 子区域：连接与模型参数（推荐写法）
+        # client 子区域：兼容旧配置，同样解析为 dataclass 字段
+        for section in ("connection", "client"):
+            for key, value in (data.get(section) or {}).items():
+                if key.startswith("_"):
+                    continue
+                if hasattr(cfg, key):
+                    setattr(cfg, key, value)
         # api 子区域：全部原样存入 api_params，自动透传
         api_data = data.get("api") or {}
         for key, value in api_data.items():
@@ -49,6 +51,10 @@ class EndpointConfig:
     def get_api_param(self, name: str, default: Any = None) -> Any:
         """读取某个 API 参数的值。"""
         return self.api_params.get(name, default)
+
+    def get_model(self) -> Any:
+        """模型名：优先 connection.model，兼容旧配置的 api.model。"""
+        return self.model or self.get_api_param("model")
 
 
 @dataclass

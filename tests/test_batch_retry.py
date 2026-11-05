@@ -61,6 +61,41 @@ class TestRunFileBatch(unittest.TestCase):
         self.assertEqual([f.path.name for f in final_failures], ["bad.txt"])
         self.assertEqual(final_failures[0].attempts, 2)
 
+    def test_retry_callback_records_intermediate_failure(self):
+        attempts: dict[str, int] = {}
+        retries = []
+
+        def worker(path: Path) -> str:
+            attempts[path.name] = attempts.get(path.name, 0) + 1
+            if path.name == "b.txt" and attempts[path.name] == 1:
+                raise OSError("暂时失败")
+            return path.name
+
+        run_file_batch(
+            stage="doc", items=[Path("a.txt"), Path("b.txt")], worker=worker,
+            workers=1, path_of=lambda path: path, unit="份", max_attempts=2,
+            progress_enabled=False, on_retry=retries.append,
+        )
+
+        self.assertEqual([f.path.name for f in retries], ["b.txt"])
+        self.assertEqual(retries[0].attempts, 1)
+        self.assertIn("暂时失败", retries[0].reason)
+
+    def test_retry_callback_not_called_without_retry(self):
+        retries = []
+
+        def worker(path: Path) -> str:
+            raise RuntimeError("始终失败")
+
+        with self.assertLogs("gradehelper.batch", level="ERROR"):
+            run_file_batch(
+                stage="doc", items=[Path("bad.txt")], worker=worker, workers=1,
+                path_of=lambda path: path, unit="份", max_attempts=1,
+                progress_enabled=False, on_retry=retries.append,
+            )
+
+        self.assertEqual(retries, [])
+
     def test_abort_exception_propagates_and_is_not_queued(self):
         def worker(path: Path) -> str:
             raise LLMAborted("用户取消")

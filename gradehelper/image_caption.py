@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from .cancel import CancelToken, LLMAborted
@@ -38,7 +38,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
         return 0
 
     logger.info("开始 vllm 图片识别：%d 张，端点 %s，模型 %s，并发 %d",
-                len(tasks), cfg.base_url, cfg.get_api_param("model"), cfg.batch_size)
+                len(tasks), cfg.base_url, cfg.get_model(), cfg.batch_size)
     done = 0
     flush_every = max(1, cfg.batch_size)
     pending: list[tuple[ParsedReport, ReportImage]] = []
@@ -69,24 +69,29 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
         pool = ThreadPoolExecutor(max_workers=max(1, cfg.batch_size))
         try:
             futures = {pool.submit(_describe, r, i): (r, i) for r, i in tasks}
-            for future in as_completed(futures):
-                report, image = futures[future]
-                try:
-                    _, _, caption = future.result()
-                    image.caption = caption
-                    done += 1
-                    pending.append((report, image))
-                    if len(pending) >= flush_every:
-                        _flush_batch()
-                except LLMAborted:
-                    raise  # 用户取消：不吞，向上传播
-                except Exception as exc:  # noqa: BLE001 单张失败不影响其他图片
-                    logger.error("图片识别失败 %s P%d: %s", report.base_name, image.index, exc)
-                    if on_error is not None:
-                        try:
-                            on_error(report, image, exc)
-                        except Exception:  # noqa: BLE001 记录失败不应影响其他图片
-                            logger.debug("图片失败回调异常", exc_info=True)
+            remaining = dict(futures)
+            while remaining:
+                completed, _ = wait(remaining, timeout=0.5, return_when=FIRST_COMPLETED)
+                if not completed:
+                    continue
+                for future in completed:
+                    report, image = remaining.pop(future)
+                    try:
+                        _, _, caption = future.result()
+                        image.caption = caption
+                        done += 1
+                        pending.append((report, image))
+                        if len(pending) >= flush_every:
+                            _flush_batch()
+                    except LLMAborted:
+                        raise  # 用户取消：不吞，向上传播
+                    except Exception as exc:  # noqa: BLE001 单张失败不影响其他图片
+                        logger.error("图片识别失败 %s P%d: %s", report.base_name, image.index, exc)
+                        if on_error is not None:
+                            try:
+                                on_error(report, image, exc)
+                            except Exception:  # noqa: BLE001 记录失败不应影响其他图片
+                                logger.debug("图片失败回调异常", exc_info=True)
         except BaseException:
             # 取消后丢弃未开始的任务；在飞的连接已由 cancel() 关闭，无需等待
             pool.shutdown(wait=False, cancel_futures=True)

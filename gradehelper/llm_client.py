@@ -108,7 +108,7 @@ class LLMClient:
         payload: dict = dict(cfg.api_params)
         payload["messages"] = messages
         payload["stream"] = True
-        payload["model"] = overrides.pop("model", cfg.get_api_param("model"))
+        payload["model"] = overrides.pop("model", cfg.get_model())
         payload.update(overrides)
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}

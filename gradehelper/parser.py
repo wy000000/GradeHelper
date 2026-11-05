@@ -93,14 +93,15 @@ def _content_key(data: bytes) -> str:
 
 # ---------------------------------------------------------------- docling 主解析
 
-def _extract_picture_bytes(doc, item) -> tuple[bytes | None, str | None]:
+def _extract_picture_bytes(doc, item, warnings: list[str]) -> tuple[bytes | None, str | None]:
     """从 docling 文档工件中取图片二进制与文件名。"""
     art_no = getattr(item, "image_item_no", None)
     if art_no is None:
         return None, None
     try:
         artifact = doc.artifacts[art_no]
-    except (IndexError, KeyError, TypeError):
+    except (IndexError, KeyError, TypeError) as exc:
+        warnings.append(f"读取 docling 图片工件失败(#{art_no}): {exc}")
         return None, None
     binary = getattr(artifact, "binary", None)
     if binary:
@@ -109,8 +110,8 @@ def _extract_picture_bytes(doc, item) -> tuple[bytes | None, str | None]:
     if uri:
         try:
             return Path(uri).read_bytes(), Path(uri).name
-        except OSError:
-            pass
+        except OSError as exc:
+            warnings.append(f"读取 docling 图片文件失败({uri}): {exc}")
     return None, None
 
 
@@ -131,7 +132,8 @@ def _replace_image_ref(md: str, art_name: str, placeholder: str) -> str:
     return new_md
 
 
-def _docling_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
+def _docling_parse(path: Path, base_name: str,
+                   warnings: list[str]) -> tuple[str, list[ReportImage]]:
     """用 docling 解析 docx，返回 (md 文本, 图片列表)。md 中图片位置为占位符。
 
     docling 对 DOCX 默认不导出图片工件（Markdown 中为 `<!-- image -->` 注释），
@@ -154,7 +156,7 @@ def _docling_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
     images: list[ReportImage] = []
     artifact_names: list[str] = []
     for item in pictures:
-        data, art_name = _extract_picture_bytes(doc, item)
+        data, art_name = _extract_picture_bytes(doc, item, warnings)
         if data is None:
             continue
         ext = _sniff_ext(data) or Path(art_name or "").suffix.lstrip(".") or "png"
@@ -164,7 +166,7 @@ def _docling_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
 
     # 2) 工件不可用时，用 python-docx 按正文出现顺序提取
     if not images:
-        images = _extract_ordered_images(path)
+        images = _extract_ordered_images(path, warnings)
 
     # 3) 把 md 中的图片位置替换为占位符 [[PIC:base_name-Pn.ext]]
     for idx, art_name in enumerate(artifact_names, start=1):
@@ -176,7 +178,7 @@ def _docling_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
     return md, images
 
 
-def _extract_ordered_images(path: Path) -> list[ReportImage]:
+def _extract_ordered_images(path: Path, warnings: list[str]) -> list[ReportImage]:
     """python-docx 按正文出现顺序提取图片（内容去重，保持首现顺序）。"""
     import docx
     from docx.oxml.ns import qn
@@ -187,10 +189,13 @@ def _extract_ordered_images(path: Path) -> list[ReportImage]:
     for blip in document.element.body.findall(".//" + qn("a:blip")):
         rid = blip.get(qn("r:embed"))
         if not rid or rid not in document.part.rels:
+            if rid:
+                warnings.append(f"图片关系缺失，无法读取: {rid}")
             continue
         try:
             blob = document.part.rels[rid].target_part.blob
-        except (KeyError, OSError):
+        except (KeyError, OSError) as exc:
+            warnings.append(f"读取文档图片失败({rid}): {exc}")
             continue
         key = _content_key(blob)
         if key in seen:
@@ -200,7 +205,7 @@ def _extract_ordered_images(path: Path) -> list[ReportImage]:
                                   ext=_sniff_ext(blob) or "png", data=blob))
     if not images:  # 最终兜底：word/media 全量
         images = [ReportImage(index=i, ext=ext, data=data)
-                  for i, (data, ext) in enumerate(_extract_media(path), start=1)]
+                  for i, (data, ext) in enumerate(_extract_media(path, warnings), start=1)]
     return images
 
 
@@ -269,7 +274,8 @@ def _table_to_md(table) -> list[str]:
     return rows
 
 
-def _collect_inline_images(para, images: list[ReportImage], seen: set[str]) -> None:
+def _collect_inline_images(para, images: list[ReportImage], seen: set[str],
+                           warnings: list[str]) -> None:
     """按行内 blip 关系提取图片 bytes，段落文本中追加 [[IMG:n]] 占位。"""
     from docx.oxml.ns import qn
 
@@ -277,10 +283,13 @@ def _collect_inline_images(para, images: list[ReportImage], seen: set[str]) -> N
     for blip in para._p.findall(".//" + qn("a:blip")):
         rid = blip.get(qn("r:embed"))
         if not rid or rid not in part.rels:
+            if rid:
+                warnings.append(f"图片关系缺失，无法读取: {rid}")
             continue
         try:
             blob = part.rels[rid].target_part.blob
-        except (KeyError, OSError):
+        except (KeyError, OSError) as exc:
+            warnings.append(f"读取文档图片失败({rid}): {exc}")
             continue
         key = _content_key(blob)
         if key in seen:
@@ -291,7 +300,7 @@ def _collect_inline_images(para, images: list[ReportImage], seen: set[str]) -> N
         para.text += f"[[IMG:{len(images)}]]"  # 仅内存对象，不影响磁盘文件
 
 
-def _extract_media(path: Path) -> list[tuple[bytes, str]]:
+def _extract_media(path: Path, warnings: list[str] | None = None) -> list[tuple[bytes, str]]:
     """直接从 docx 压缩包的 word/media 提取全部图片（兜底补充）。"""
     import zipfile
 
@@ -305,12 +314,14 @@ def _extract_media(path: Path) -> list[tuple[bytes, str]]:
                     ext = sniffed or Path(name).suffix.lstrip(".").lower() or "png"
                     if f".{ext}" in IMAGE_EXTS or sniffed:
                         out.append((data, ext))
-    except (OSError, zipfile.BadZipFile):
-        pass
+    except (OSError, zipfile.BadZipFile) as exc:
+        if warnings is not None:
+            warnings.append(f"读取 docx 压缩包图片失败: {exc}")
     return out
 
 
-def _docx_fallback_parse(path: Path, base_name: str) -> tuple[str, list[ReportImage]]:
+def _docx_fallback_parse(path: Path, base_name: str,
+                         warnings: list[str]) -> tuple[str, list[ReportImage]]:
     """python-docx 兜底：段落/表格转 md，图片按行内关系 + word/media 提取。"""
     import docx
     from docx.oxml.ns import qn
@@ -325,7 +336,7 @@ def _docx_fallback_parse(path: Path, base_name: str) -> tuple[str, list[ReportIm
     for child in document.element.body.iterchildren():
         if child.tag == qn("w:p"):
             para = Paragraph(child, document)
-            _collect_inline_images(para, images, seen)
+            _collect_inline_images(para, images, seen, warnings)
             text = para.text.strip()
             if not text:
                 lines.append("")
@@ -345,7 +356,7 @@ def _docx_fallback_parse(path: Path, base_name: str) -> tuple[str, list[ReportIm
             lines.extend(_table_to_md(Table(child, document)))
 
     # word/media 中未通过行内关系取到的图片，按压缩包内顺序补充
-    for data, ext in _extract_media(path):
+    for data, ext in _extract_media(path, warnings):
         if _content_key(data) in seen:
             continue
         images.append(ReportImage(index=len(images) + 1, ext=ext, data=data))
@@ -385,11 +396,17 @@ def parse_report(
     warnings: list[str] = []
     base_name = f"{course}{separator}{klass}{separator}{student_id}{separator}{std_name}{separator}{report_name}"
     try:
-        md, images = _docling_parse(path, base_name)
+        md, images = _docling_parse(path, base_name, warnings)
     except Exception as exc:  # docling 依赖模型，任何异常都走兜底
         warnings.append(f"docling 解析失败，回退 python-docx: {exc}")
         logger.warning("%s: docling 解析失败(%s)，回退 python-docx", path.name, exc)
-        md, images = _docx_fallback_parse(path, base_name)
+        try:
+            md, images = _docx_fallback_parse(path, base_name, warnings)
+        except Exception as fallback_exc:
+            # 兜底也失败：把两次失败原因都带上，便于运行日志定位中间错误
+            raise RuntimeError(
+                f"docling 解析失败({exc})，python-docx 兜底也失败({fallback_exc})"
+            ) from fallback_exc
 
     return ParsedReport(course=course, klass=klass, student_id=student_id, std_name=std_name,
                         report_name=report_name, tag_dep=tag_dep,
@@ -405,11 +422,13 @@ def parse_all(
     on_error: Callable[[Path, Exception], None] | None = None,
     workers: int = 1,
     max_attempts: int = 2,
+    on_retry: Callable[[Path, Exception, int], None] | None = None,
 ) -> list[ParsedReport]:
     """扫描并多线程解析目录下所有合规报告，解析结果全部驻留内存。
 
     - 单份文档解析失败不会中断其它文档；
     - 失败文件进入异常队列，全部解析完成后自动重试；
+    - 每次失败且还会重试时通过 ``on_retry`` 记录中间错误；
     - 重试结束仍失败的文档通过 ``on_error`` 回调记录，其余文档照常返回。
 
     ``on_error`` 只在重试结束后对最终仍失败的文档调用一次，
@@ -425,6 +444,13 @@ def parse_all(
             except Exception:  # noqa: BLE001 记录失败不应影响解析流程
                 logger.debug("解析失败回调异常", exc_info=True)
 
+    def _on_retry_failure(failed) -> None:
+        if on_retry is not None:
+            try:
+                on_retry(failed.path, failed.error, failed.attempts)
+            except Exception:  # noqa: BLE001 记录失败不应影响解析流程
+                logger.debug("解析中间失败回调异常", exc_info=True)
+
     outcome = run_file_batch(
         stage="doc",
         items=paths,
@@ -435,6 +461,7 @@ def parse_all(
         label_of=lambda path: path.name,
         unit="份",
         on_failure=_on_final_failure,
+        on_retry=_on_retry_failure,
         max_attempts=max_attempts,
     )
     return outcome.results

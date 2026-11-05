@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from gradehelper import batch as batch_module  # noqa: E402
 from gradehelper.config import AppConfig, PathsConfig  # noqa: E402
 from gradehelper.grader import Grader  # noqa: E402
 from gradehelper.models import ItemScore, ParsedReport, ReportImage, RuleItem  # noqa: E402
@@ -108,8 +109,14 @@ class TestStageDocCleansMd(unittest.TestCase):
         with patch("gradehelper.grader.parse_all", return_value=[report]), \
                 patch("gradehelper.grader.read_rules", return_value=[rule]), \
                 patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
-            _grader().stage_doc(self.tmp, self.template, skip_images=2,
-                                output=self.result_path)
+            grader = _grader()
+            grader.stage_doc(self.tmp, self.template, skip_images=2,
+                             output=self.result_path)
+
+        entry = grader.stage_logs[-1]
+        self.assertEqual(entry.extra.get("文档"), "处理 1 份 / 成功 1 份 / 失败 0 份")
+        self.assertEqual((entry.processed_count, entry.succeeded_count,
+                          entry.failed_count), (1, 1, 0))
 
         saved = (self.tmp / f"{BASE}.md").read_text(encoding="utf-8")
         # 跳过图片（P1、P2）的占位符不写入 md，剩余图片（P3）占位符保留
@@ -148,6 +155,81 @@ class TestLoadReportsCleansSkippedPlaceholders(unittest.TestCase):
         self.assertNotIn(_full(1), report.md_text)
         self.assertIn(_full(3), report.md_text)
         self.assertEqual([img.index for img in report.images], [3])
+
+    def test_load_progress_is_labeled_as_loading(self):
+        """加载 md 的进度条带「加载MD文档」后缀，避免与同阶段后续评分进度混淆。"""
+        (self.tmp / f"{BASE}.md").write_text(
+            f"{_full(3)}\n正文\n", encoding="utf-8")
+        (self.tmp / f"{BASE}-P3.png").write_bytes(b"img")
+
+        labels: list[str] = []
+        real = batch_module.ParallelProgress
+
+        class Recording(real):  # type: ignore[misc, valid-type]
+            def __init__(self, stage, *args, **kwargs):
+                labels.append(stage)
+                super().__init__(stage, *args, **kwargs)
+
+        with patch.object(batch_module, "ParallelProgress", Recording):
+            _grader()._load_reports_for_pic(self.tmp, skip_images=0, stage="sen")
+
+        self.assertEqual(labels, ["sen 加载MD文档"])
+
+
+class TestLoadReportsWarnings(unittest.TestCase):
+    """pic/sen 加载 md 时，缺失图片等中间解析错误写入 report.warnings。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_picture_is_recorded_as_warning(self):
+        (self.tmp / f"{BASE}.md").write_text(
+            f"{_full(3)}\n正文\n", encoding="utf-8")
+        # 不创建 P3 图片文件
+
+        with self.assertLogs("gradehelper.report_io", level="WARNING"):
+            reports = _grader()._load_reports_for_pic(self.tmp, skip_images=0)
+
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].images, [])
+        self.assertTrue(any("未找到图片文件" in w for w in reports[0].warnings))
+
+
+class TestStageDocRecordsParseWarnings(unittest.TestCase):
+    """doc 阶段把 report.warnings（如 docling 回退）写入阶段日志。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.template = self.tmp / "template.xlsx"
+        self.result_path = self.tmp / "result.xlsx"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_report_warnings_are_written_to_stage_log(self):
+        report = ParsedReport(
+            course="云安全", klass="安全2401", student_id="2021001", std_name="张三",
+            report_name="课程报告", source_path=str(self.tmp / f"{BASE}.docx"),
+            md_text="正文\n", warnings=["docling 解析失败，回退 python-docx: boom"],
+        )
+        rule = RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+                        evaluation="", comment="报告已提交，+25分")
+        scores = {"2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
+                                                    comment="报告已提交，+25分")}}
+        grader = _grader()
+        with patch("gradehelper.grader.parse_all", return_value=[report]), \
+                patch("gradehelper.grader.read_rules", return_value=[rule]), \
+                patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
+            grader.stage_doc(self.tmp, self.template, skip_images=2,
+                             output=self.result_path)
+
+        entry = grader.stage_logs[-1]
+        self.assertTrue(any("docling 解析失败" in w for w in entry.warnings))
 
 
 if __name__ == "__main__":

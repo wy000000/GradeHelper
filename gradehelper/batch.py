@@ -5,6 +5,7 @@
 - 每个文件独立执行，单个文件失败不会中断其它文件；
 - 失败文件进入异常队列（按文件路径去重）；
 - 一轮全部完成后，对异常队列中的文件再重试；
+- 每次失败且还会重试时通过 ``on_retry`` 回调记录中间错误；
 - 重试结束仍有失败时只记录日志并返回，不影响已经成功的文件。
 
 ``KeyboardInterrupt`` / ``LLMAborted`` 等中止信号不会入队，而是立即向上传播。
@@ -15,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Generic, TypeVar
@@ -102,14 +103,16 @@ def run_file_batch(
     label_of: Callable[[T], str] | None = None,
     unit: str = "个文件",
     on_failure: Callable[[FailedFile[T]], None] | None = None,
+    on_retry: Callable[[FailedFile[T]], None] | None = None,
     on_success: Callable[[R], None] | None = None,
     max_attempts: int = 2,
     progress_enabled: bool = True,
+    progress_stage: str | None = None,
 ) -> BatchOutcome[R]:
     """多线程处理文件，失败入队并在整批结束后自动重试。
 
     参数：
-    - ``stage``：阶段名，用于日志与进度显示（doc / pic / sen）；
+    - ``stage``：阶段名，用于日志（doc / pic / sen）；
     - ``items``：待处理文件/报告列表；
     - ``worker``：单文件处理函数；抛异常表示该文件失败；
     - ``workers``：并发线程数；
@@ -117,8 +120,11 @@ def run_file_batch(
     - ``label_of``：进度显示用的简短标签；
     - ``on_failure``：最终仍未成功的文件回调（每轮失败只在日志中提示，
       避免同一文件产生多条失败记录）；
+    - ``on_retry``：某文件本次失败、且后面还会重试时回调，用于记录中间错误；
     - ``on_success``：每个文件成功后立即回调（用于 sen 的实时回写）；
-    - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮。
+    - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮；
+    - ``progress_stage``：进度条显示的阶段名；默认与 ``stage`` 相同。
+      加载 md、LLM 评分等同一阶段内的多个批处理可借此区分，避免进度提示混淆。
 
     返回成功结果（保持输入顺序）与最终异常队列。
     """
@@ -137,7 +143,8 @@ def run_file_batch(
         if not pending:
             break
         failures = FailureQueue()
-        round_stage = stage if attempt == 1 else f"{stage}重试"
+        progress_label = progress_stage or stage
+        round_stage = progress_label if attempt == 1 else f"{progress_label}重试"
         progress = ParallelProgress(
             round_stage, len(pending), unit=unit,
             workers=max(1, int(workers)), enabled=progress_enabled,
@@ -149,29 +156,45 @@ def run_file_batch(
                 for _index, item in pending:
                     label = label_of(item) if label_of is not None else str(path_of(item))
                     futures[pool.submit(_run_one, progress, worker, item, label)] = item
-                for future in as_completed(futures):
-                    item = futures[future]
-                    try:
-                        result = future.result()
-                    except _ABORT_EXCEPTIONS:
-                        raise
-                    except BaseException as exc:  # noqa: BLE001 单文件失败不影响其它文件
-                        path = path_of(item)
-                        failures.add(item, path, exc, attempt)
-                        logger.warning(
-                            "【阶段 %s】%s 处理失败（第 %d/%d 次）: %s",
-                            stage, _label(item, path_of, label_of), attempt,
-                            total_attempts, str(exc) or exc.__class__.__name__,
-                        )
-                        continue
-                    results[index_by_path[str(path_of(item))]] = result
-                    if on_success is not None:
+                # 用带超时的 wait 替代无超时的 as_completed：
+                # Windows 上 condition.wait() 无法被 KeyboardInterrupt 打断，
+                # 必须等到某个 future 完成才返回。设置短超时让主线程定期检查中断。
+                remaining = dict(futures)
+                while remaining:
+                    done, _ = wait(remaining, timeout=0.5, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue  # 超时未完成，继续轮询（KeyboardInterrupt 在此被处理）
+                    for future in done:
+                        item = remaining.pop(future)
                         try:
-                            on_success(result)
+                            result = future.result()
                         except _ABORT_EXCEPTIONS:
                             raise
-                        except BaseException:  # noqa: BLE001 回调失败不应中断批处理
-                            logger.error("【阶段 %s】成功回调异常", stage, exc_info=True)
+                        except BaseException as exc:  # noqa: BLE001 单文件失败不影响其它文件
+                            path = path_of(item)
+                            failed = FailedFile(item, path, exc, attempt)
+                            failures.add(item, path, exc, attempt)
+                            logger.warning(
+                                "【阶段 %s】%s 处理失败（第 %d/%d 次）: %s",
+                                stage, _label(item, path_of, label_of), attempt,
+                                total_attempts, str(exc) or exc.__class__.__name__,
+                            )
+                            # 本次失败且后续还会重试：通知调用方记录中间错误
+                            if attempt < total_attempts and on_retry is not None:
+                                try:
+                                    on_retry(failed)
+                                except BaseException:  # noqa: BLE001 记录失败不应影响批处理
+                                    logger.error("【阶段 %s】中间失败回调异常", stage,
+                                                 exc_info=True)
+                            continue
+                        results[index_by_path[str(path_of(item))]] = result
+                        if on_success is not None:
+                            try:
+                                on_success(result)
+                            except _ABORT_EXCEPTIONS:
+                                raise
+                            except BaseException:  # noqa: BLE001 回调失败不应中断批处理
+                                logger.error("【阶段 %s】成功回调异常", stage, exc_info=True)
             except BaseException:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise

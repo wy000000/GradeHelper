@@ -3,15 +3,27 @@
 endpoints:
   # 通用 LLM 评分端点（OpenAI 兼容接口；不限定本地或 llama 实现）
   llm:
-    client:                # 客户端专用参数（不会发送给 API）
+    # connection:            # mimo
+    #   base_url: "https://api.xiaomimimo.com/v1"
+    #   model: "mimo-v2.6-flash"
+    #   api_key: ""
+    
+    # connection:            # deepseek
+    #   base_url: "https://api.deepseek.com"
+    #   model: "deepseek-flash"
+    #   api_key: "sk-748a5f9d496749ce912b3032ef760ade"
+    
+    connection:            # local
       base_url: "http://localhost:8080/"
-      api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
+      model: "qwen35-thinking-coding"
+      api_key: ""    # OpenAI 兼容鉴权密钥；本地无鉴权时留空      
+      
+    client:                # 客户端专用参数（不会发送给 API）
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # LLM 端点的失败重试次数配置。
       batch_size: 4        # sen 阶段并发提交的报告数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
-      model: "qwen35-thinking-coding"
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
       top_k: 0             # 关闭（部分引擎用 0/负数表示禁用）
@@ -21,18 +33,30 @@ endpoints:
       repeat_penalty: 1.0  # 保持关闭；只有输出复读时才微调到 1.03~1.05
       seed: 42             # 固定种子
       reasoning: "off"      # 保留；让模型先分析证据再打分
-      #max_tokens: 4096
+
   # 图片批量识别端点（多模态，含 mmproj）；默认与 llm 相同，可各自独立覆盖
   vllm:
-    client:                # 客户端专用参数（不会发送给 API）
+    # connection:            # mimo
+    #   base_url: "https://api.xiaomimimo.com/v1"
+    #   model: "mimo-v2.6-flash"
+    #   api_key: ""
+
+    # connection:            # deepseek
+    #   base_url: "https://api.deepseek.com"
+    #   model: "deepseek-flash"
+    #   api_key: ""
+
+    connection:            # local
       base_url: "http://localhost:8080/"
+      model: "qwen35-thinking-coding"
       api_key: ""          # OpenAI 兼容鉴权密钥；本地无鉴权时留空
+
+    client:                # 客户端专用参数（不会发送给 API）
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # VLLM 端点的失败重试次数配置。
       batch_size: 4        # 并发识别图片数
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
-      model: "qwen35-thinking-coding"
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
       top_k: 0             # 关闭（部分引擎用 0/负数表示禁用）
@@ -42,7 +66,6 @@ endpoints:
       repeat_penalty: 1.0  # 保持关闭；只有输出复读时才微调到 1.03~1.05
       seed: 42             # 固定种子
       reasoning: "off"      # 保留；让模型先分析证据再打分
-      #max_tokens: 1024
 
 paths:
   reports_dir: "D:/AI/Reports/"                        # 报告所在目录
@@ -52,8 +75,8 @@ paths:
   save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）
   log_path: ""                                    # 运行日志文件路径；留空表示按 log_name_format 生成
   log_name_format: "{course}-{tagDep}-{reportName}.log"  # 运行日志文件名格式（与模板同目录）
-  # log_max_size_kb: 32                             # 日志超过该大小（KB）才清理旧记录；0 表示不清理
-  # log_retention_days: 1                           # 日志记录保留天数；0 表示不清理
+  # log_max_size_kb: 32                           # 日志超过该大小（KB）才清理旧记录；0 表示不清理
+  # log_retention_days: 1                         # 日志记录保留天数；0 表示不清理
   parse_workers: 4                                # 单文件处理并发数（doc 解析/落盘、pic/sen 加载 md）
   retry_rounds: 1                                 # 单文件失败后的额外重试轮数；0 表示不重试
   # 报告文件命名格式：字段模板与分隔符（用于从文件名解析 课程-班级-学号-姓名-报告名）
@@ -79,6 +102,7 @@ prompts:
     7. 可以对时间点的有无扣分，不要对时间的准确性扣分。
     8.confidence 取值 0~1（1 表示非常确定）：内容清晰、标准匹配明确时 ≥0.8；
       标准模糊、内容矛盾或信息不足时 <0.7。
+    9. 请尽量使用简短评语(但不能省略评论要素)，避免输出超长被截断。
 
     评分项列表（格式：评分项编号；分数范围；评分标准）：
     {items_section}

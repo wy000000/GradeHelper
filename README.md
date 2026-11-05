@@ -89,7 +89,7 @@ python -m gradehelper --version   # 查看版本号
 | `full` | 同上 | 依次执行 `doc` → `pic` → `sen` | 同三个阶段 |
 
 - `pic` 仅在 `rule` 表存在 LLM 评分项时才识别图片；没有 LLM 项时跳过识图。
-- 三个阶段都按文件多线程处理（`paths.parse_workers`）：单份文档的解析、加载或保存失败只会进入异常队列，不会中断其它文档；整批处理完成后自动重试异常队列（`paths.retry_rounds`，默认再重试 1 轮），重试后仍失败的文件记录到运行日志并跳过。
+- 三个阶段都按文件多线程处理（`paths.parse_workers`）：单份文档的解析、加载或保存失败只会进入异常队列，不会中断其它文档；整批处理完成后自动重试异常队列（`paths.retry_rounds`，默认再重试 1 轮），重试后仍失败的文件记录到运行日志并跳过。重试过程中的**中间错误**（如某次解析/加载/识图/评分失败后重试成功、docling 回退、图片缺失等）也会一并写入阶段日志的 `中间错误: N 条` 中。
 - 并发数来自配置：`pic` 用 `endpoints.vllm.client.batch_size`（并发识图数），`sen` 用 `endpoints.llm.client.batch_size`（并发报告数）。
 - `doc` / `sen` 阶段开始前会先检查结果 xlsx 能否写入：若文件已在其它程序中打开（如 Excel），立即提示“结果文件无法写入……”并以退出码 1 结束，该阶段不做解析与评分；结果文件不存在（首次运行）视为可写。
 - 结果 xlsx 的写入方式：`doc` 用 upsert（按学号匹配，存在则更新该行，不存在则追加新行）；`sen` 用 strict（只更新已有行，不会新增行）。`result` 表表头与当前处理规则不一致时，`doc` 会清空该表重建，`sen` 则在提交任何 LLM 请求之前报错退出。
@@ -158,18 +158,24 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 | `endpoints.llm` | 文字评分（`sen` 阶段） |
 | `endpoints.vllm` | 图片识别（`pic` 阶段） |
 
-每套端点包含两个子区域。`client`（客户端参数，不发送给 API）：
+每套端点包含三个子区域。`connection`（连接与模型，切换服务商只需改这一组）：
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `base_url` | `http://localhost:8080/` | OpenAI 兼容接口地址 |
 | `api_key` | 空 | 鉴权密钥；本地无鉴权时留空 |
+| `model` | 空 | 模型名；请求时作为 `model` 字段发送给 `/chat/completions` |
+
+`client`（客户端参数，不发送给 API）：
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
 | `connect_timeout` | `10` | TCP/TLS 连接超时（秒） |
 | `read_timeout` | `300` | 流式读取时两个数据块之间的最大静默时间（秒） |
 | `max_retries` | `3` | 请求失败重试次数 |
 | `batch_size` | `4` | `llm` 为 `sen` 阶段并发报告数；`vllm` 为并发识图数 |
 
-`api`（原样透传给 `/chat/completions`，新增任意键自动生效）：`model`、`temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`frequency_penalty`、`repeat_penalty`、`seed`、`reasoning`、`max_tokens`（默认注释掉，即不限制）。
+`api`（原样透传给 `/chat/completions`，新增任意键自动生效）：`temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`frequency_penalty`、`repeat_penalty`、`seed`、`reasoning`、`max_tokens`（默认注释掉，即不限制）。
 
 ### paths：路径与命名
 
