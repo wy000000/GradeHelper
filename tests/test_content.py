@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.models import ParsedReport, RuleItem  # noqa: E402
 from gradehelper.rules.content import (  # noqa: E402
-    has_requirement, summary_docker, summary_sql, too_many_list, window_similarity,
+    has_requirement, too_many_list, window_similarity,
 )
 
 
@@ -78,42 +78,6 @@ class TestHasRequirement(unittest.TestCase):
             text = "甲" * pad + variant + "正文内容" * 8
             self.assertTrue(window_similarity(text, pattern, 0.9),
                             msg=f"偏移 {pad} 个字符时漏判")
-
-
-class TestSummaryKeywords(unittest.TestCase):
-    def test_keywords(self):
-        md = "正文\n\n## 总结\n通过本课程学习了 docker 容器技术，也了解了 MongoDB 和 SQLite。"
-        self.assertEqual(summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 2.0)
-        self.assertEqual(summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 2.0)
-
-    def test_docker_synonyms_case_insensitive(self):
-        for md in (
-            "正文\n\n## 总结\n掌握了容器与 Container 技术。",
-            "正文\n\n## 总结\n学会了制作 Image 镜像。",
-            "正文\n\n## 总结\n深入理解了 DOCKER 的编排。",
-        ):
-            self.assertEqual(
-                summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 2.0)
-
-    def test_nosql_synonyms_case_insensitive(self):
-        for md in (
-            "正文\n\n## 总结\n了解了非关系型数据库与文档数据库。",
-            "正文\n\n## 总结\n研究了列存储与键值存储的特点。",
-            "正文\n\n## 总结\n对比了 HBase 与 MONGODB。",
-        ):
-            self.assertEqual(
-                summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 2.0)
-
-    def test_absent(self):
-        no = make_report("正文\n\n## 总结\n没有涉及重点内容。")
-        self.assertEqual(summary_docker(no, make_rule("summaryDocker", "2"))[0], 0.0)
-        self.assertEqual(summary_sql(no, make_rule("summarySql", "2"))[0], 0.0)
-
-    def test_keyword_only_in_body_not_counted(self):
-        # 关键字只出现在正文前部、不在最后总结部分时不应加分
-        md = "docker 与 nosql 的知识\n\n## 总结\n本课程收获很大。"
-        self.assertEqual(summary_docker(make_report(md), make_rule("summaryDocker", "2"))[0], 0.0)
-        self.assertEqual(summary_sql(make_report(md), make_rule("summarySql", "2"))[0], 0.0)
 
 
 if __name__ == "__main__":

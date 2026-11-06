@@ -220,17 +220,13 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
             md = Path(report.source_path).read_text(encoding="utf-8")
             self.assertIn("图3描述", md)
             self.assertEqual(md.count("图3描述"), 1)
-        # 逐项失败记录（定位到文档 + 图片编号 + 环节）
-        failures = [entry for entry in grader.stage_logs
-                    if entry.error and "描述写盘失败" in entry.error]
-        self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0].stage, "pic")
-        self.assertEqual(failures[0].document, bad.base_name)
-        self.assertEqual(failures[0].extra.get("图片"), "P3")
-        self.assertEqual(failures[0].extra.get("环节"), "写盘")
+        # 中途不再写单独的失败记录；文档名登记在阶段总结的「失败文档」
+        self.assertFalse(any("描述写盘失败" in (entry.error or "")
+                             for entry in grader.stage_logs))
         # 阶段汇总：计数 + 提示可重跑
         summary = self._summary_extra(grader)
         self.assertEqual(summary.get("写盘失败"), "1 张 txt / 0 份 md")
+        self.assertIn(Path(bad.source_path).name, summary.get("失败文档", ""))
         self.assertEqual(summary.get("base_url"), "http://vllm.test")
         self.assertEqual(summary.get("model"), "vlm-test")
         self.assertEqual(summary.get("文档"), "处理 3 份 / 成功 3 份 / 失败 0 份")
@@ -255,12 +251,12 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
         # 同批另一份报告 md 正常写入
         self.assertIn("图3描述",
                       Path(reports[1].source_path).read_text(encoding="utf-8"))
-        failures = [entry for entry in grader.stage_logs
-                    if entry.error and "md 回写失败" in entry.error]
-        self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0].document, bad.base_name)
-        self.assertEqual(failures[0].extra.get("环节"), "写盘")
-        self.assertEqual(self._summary_extra(grader).get("写盘失败"), "0 张 txt / 1 份 md")
+        # 中途不再写单独的失败记录；文档名登记在阶段总结的「失败文档」
+        self.assertFalse(any("md 回写失败" in (entry.error or "")
+                             for entry in grader.stage_logs))
+        summary = self._summary_extra(grader)
+        self.assertEqual(summary.get("写盘失败"), "0 张 txt / 1 份 md")
+        self.assertIn(Path(bad.source_path).name, summary.get("失败文档", ""))
 
 
 class TestSenCheckpointWriteback(unittest.TestCase):
@@ -318,6 +314,37 @@ class TestSenCheckpointWriteback(unittest.TestCase):
         self.assertEqual(entry.extra.get("model"), "llm-test")
         self.assertEqual(entry.extra.get("报告"), "处理 4 份 / 成功 4 份 / 失败 0 份")
         self.assertEqual(entry.failed_count, 0)
+
+    def test_truncated_json_is_failure_with_id_and_name(self):
+        grader = Grader(_config(batch=2))
+        grader._load_reports_for_pic = lambda *args, **kwargs: list(self.reports)
+
+        def fake_grade(_client, report, _llm_rules):
+            if report.student_id == "2021002":
+                raise ValueError("无法从 LLM 输出中解析 JSON（长度=100）")
+            return {"event": ItemScore(key="event", score=12.0, confidence=0.9,
+                                       comment="LLM 评语")}
+
+        grader._grade_with_llm_batch = fake_grade
+        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
+                self.assertLogs("gradehelper.grader", level="INFO") as logs:
+            out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
+                                   skip_images=0)
+
+        self.assertEqual(out, self.result_path)
+        items = read_result_items(self.result_path)
+        self.assertEqual(items["2021002"]["event"].score, 0.0)  # 未评分，保留原值
+        doc_name = "云安全-安全2401-2021002-张三-课程报告.md"
+        entry = grader.stage_logs[-1]
+        self.assertEqual(entry.failed_count, 1)
+        self.assertEqual(entry.extra.get("失败文档"), doc_name)
+        # 中途不再为失败文档单独写记录；文档名出现在总结的标题与「失败文档」里
+        self.assertFalse(any(item.error for item in grader.stage_logs))
+        self.assertEqual(entry.document, doc_name)
+        self.assertIn(doc_name, entry.title)
+        console = "\n".join(logs.output)
+        self.assertIn("处理 4 份文档：成功 3 份，失败 1 份", console)
+        self.assertIn(f"失败文档：{doc_name}", console)
 
 
 class TestSenPreflight(unittest.TestCase):

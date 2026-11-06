@@ -24,6 +24,23 @@ _SEP_DASH = "-" * 60
 _LOG_TITLE = "GradeHelper \u8fd0\u884c\u65e5\u5fd7 Ver " + __version__
 
 
+def format_duration(seconds: float) -> str:
+    """把秒数格式化为 小时:分钟:秒（HH:MM:SS）。"""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def format_stage_title(stage: str, *, course: str = "", tag_dep: str = "",
+                       report_name: str = "", document: str = "") -> str:
+    """阶段标题：课程名称-系部专业-报告名称-阶段；单项失败时用文档名替代报告名。"""
+    course = (course or "").strip() or "未知课程"
+    tag_dep = (tag_dep or "").strip() or "系部专业"
+    detail = ((document or "").strip() or (report_name or "").strip() or "未知报告")
+    return f"{course}-{tag_dep}-{detail}-{stage}"
+
+
 @dataclass
 class StageLogEntry:
     """单个阶段的运行日志记录。"""
@@ -49,15 +66,14 @@ class StageLogEntry:
     extra: dict[str, str] = field(default_factory=dict)  # 阶段附加信息
     warnings: list[str] = field(default_factory=list)   # 中间解析错误（非致命，单项仍成功）
     record_time: str = ""           # 日志记录写入时间（清理依据）
+    list_warnings: bool = True      # 总结里是否逐条列出中间错误；sen 的中间错误按时序
+                                    # 单独写入日志，总结只保留条数
 
     @property
     def title(self) -> str:
         """阶段标题：课程名称-系部专业-报告名称-阶段；单项失败时用文档名替代报告名。"""
-        course = (self.course or "").strip() or "未知课程"
-        tag_dep = (self.tag_dep or "").strip() or "系部专业"
-        detail = ((self.document or "").strip() or (self.report_name or "").strip()
-                  or "未知报告")
-        return f"{course}-{tag_dep}-{detail}-{self.stage}"
+        return format_stage_title(self.stage, course=self.course, tag_dep=self.tag_dep,
+                                  report_name=self.report_name, document=self.document)
 
 
 class RunLogMixin:
@@ -252,7 +268,46 @@ class RunLogMixin:
             _SEP_EQ,
         ]
         self._append_log("\n".join(lines) + "\n")
+        logger.info("%s", "\n".join(lines))
 
+
+    def _append_stage_start_entry(self, *, stage: str, course: str = "",
+                                  tag_dep: str = "", report_name: str = "",
+                                  config: dict[str, str] | None = None) -> None:
+        """阶段开始：先把配置信息写入运行日志（控制台同步输出一份）。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            _SEP_EQ,
+            format_stage_title(stage, course=course, tag_dep=tag_dep,
+                               report_name=report_name),
+            f"执行阶段: {stage}",
+            f"记录时间: {now}",
+            f"运行开始: {now}",
+        ]
+        for key, value in (config or {}).items():
+            if value:
+                lines.append(f"{key}: {value}")
+        lines.append("状态: 开始")
+        lines.append(_SEP_EQ)
+        text = "\n".join(lines) + "\n"
+        self._append_log(text)
+        logger.info("%s", "\n".join(lines))
+
+    def _append_stage_event(self, *, stage: str, level: str, message: str) -> None:
+        """处理过程中按时序追加一条出错/报警信息（含文档名与出错内容）。
+
+        只写入日志文件；控制台的对应输出由各处理点的 logging 负责，避免重复刷屏。
+        """
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            _SEP_DASH,
+            f"记录时间: {now}",
+            f"阶段: {stage}",
+            f"级别: {level}",
+            f"内容: {message}",
+            _SEP_DASH,
+        ]
+        self._append_log("\n".join(lines) + "\n")
 
     def _append_run_footer(self, *, start_dt: datetime, elapsed: float,
                            error: str | None) -> None:
@@ -272,12 +327,14 @@ class RunLogMixin:
             _SEP_DASH,
             f"记录时间: {now}",
             f"运行结束: {now}",
-            f"总用时: {elapsed:.2f} 秒",
+            f"总用时: {format_duration(elapsed)}",
             f"状态: {status}",
             _SEP_EQ,
             "",
         ]
         self._append_log("\n".join(lines) + "\n")
+        # 运行结束时，log 记录的信息同样输出到控制台
+        logger.info("%s", "\n".join(lines))
         if self._log_path and not self._log_failed:
             logger.info("运行日志已追加: %s", self._log_path)
 
@@ -294,7 +351,8 @@ class RunLogMixin:
                            processed: int | None = None,
                            succeeded: int | None = None,
                            failed: int = 0,
-                           unit: str = "份") -> StageLogEntry:
+                           unit: str = "份",
+                           list_warnings: bool = True) -> StageLogEntry:
         """构造阶段日志记录；标题取第一份报告的课程/系部专业/报告名。"""
         first = title_report or (reports[0] if reports else None)
         start_report = reports[0] if reports else first
@@ -328,6 +386,7 @@ class RunLogMixin:
             output=str(output) if output is not None else "",
             extra=extras,
             warnings=list(warnings or []),
+            list_warnings=list_warnings,
         )
 
     def _append_failure_entry(self, *, stage: str, error: str,
@@ -361,7 +420,7 @@ class RunLogMixin:
         if not entry.record_time:
             entry.record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.stage_logs.append(entry)
-        lines = [entry.title]
+        lines = [_SEP_EQ, entry.title]
         lines.append(f"\u6267\u884c\u9636\u6bb5: {entry.stage}")
         if entry.reports_dir:
             lines.append(f"\u62a5\u544a\u76ee\u5f55: {entry.reports_dir}")
@@ -375,7 +434,7 @@ class RunLogMixin:
             lines.append(f"\u7ed3\u675f\u5b66\u53f7: {entry.end_student_id}")
         lines.append(f"\u8fd0\u884c\u5f00\u59cb: {entry.start_time}")
         lines.append(f"\u7ed3\u675f\u65f6\u95f4: {entry.end_time}")
-        lines.append(f"\u7528\u65f6: {entry.duration_seconds:.2f} \u79d2")
+        lines.append(f"\u7528\u65f6: {format_duration(entry.duration_seconds)}")
         if entry.processed_count:
             unit = entry.unit or "份"
             lines.append(f"共处理: {entry.processed_count} {unit}")
@@ -387,8 +446,9 @@ class RunLogMixin:
             lines.append(f"{key}: {value}")
         if entry.warnings:
             lines.append(f"\u4e2d\u95f4\u9519\u8bef: {len(entry.warnings)} \u6761")
-            for warning in entry.warnings:
-                lines.append(f"  - {warning}")
+            if entry.list_warnings:
+                for warning in entry.warnings:
+                    lines.append(f"  - {warning}")
         if entry.error:
             lines.append(f"状态: 失败 - {entry.error}")
         elif entry.failed_count:
@@ -400,4 +460,8 @@ class RunLogMixin:
             lines.append("状态: 成功（有警告）")
         else:
             lines.append("状态: 成功")
-        self._append_log("\n".join(lines) + "\n")
+        lines.append(_SEP_EQ)
+        text = "\n".join(lines) + "\n"
+        self._append_log(text)
+        # 阶段完成时，log 记录的信息同样输出到控制台
+        logger.info("%s", "\n".join(lines))

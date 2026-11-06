@@ -40,17 +40,32 @@ def redundant_rname(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
 
 
 def has_catalogue(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """包含目录：报告前半部分出现“目录”标题或目录条目特征（标题+……+页码）。"""
+    """包含目录：报告前半部分存在“目录”标题且内容非空，或出现目录条目特征。"""
     text = report.md_text
     first_half = text[: len(text) // 2]
-    has_heading = "目录" in first_half or re_search_toc_heading(first_half)
-    has_toc_entries = count_toc_lines(first_half) >= 3
-    if has_heading or has_toc_entries:
+    lines = text.splitlines()
+    for index, raw_line in enumerate(first_half.splitlines()):
+        if not CATALOGUE_TITLE.match(_plain_text(raw_line)):
+            continue
+        if not _catalogue_section_has_content(lines, index, _heading_level(raw_line)):
+            return 0.0, "报告目录内容为空，不加分。"
+        score = rule.default_numeric() or 0.0
+        return score, rule.comment or f"报告包含目录，+{score:g}分。"
+    if count_toc_lines(first_half) >= 3:
         score = rule.default_numeric() or 0.0
         return score, rule.comment or f"报告包含目录，+{score:g}分。"
     return 0.0, "报告未检测到目录，不加分。"
 
 
+CATALOGUE_TITLE = re.compile(
+    r"^(?:"
+    r"第?[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
+    r"|\d+(?:\.\d+)*\s*[、.．,，:：)]?\s*"
+    r")?"
+    r"(?:目\s*录|table\s+of\s+contents|contents?)"
+    r"(?:\s*[（(][^）)]*[)）])?\s*[:：]?$",
+    re.IGNORECASE,
+)
 REFERENCE_TITLE = re.compile(
     r"^(?:"
     r"第?[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
@@ -64,6 +79,8 @@ MD_HEADING = re.compile(r"^(#{1,6})\s+\S")
 PIC_ONLY_LINE = re.compile(r"^\[\[PIC:[^\]]+\]\]$")
 HTML_COMMENT_ONLY = re.compile(r"^<!--.*-->$")
 RULE_SEPARATOR_LINES = {"---", "***", "___"}
+# 目录条目：标题文字 + 制表符/点线/连续空格 + 页码
+TOC_ENTRY = re.compile(r"^.{1,60}(?:\t+|\s{4,}|\.{3,}|…{1,2})\d{1,3}\s*$")
 
 
 def _heading_level(line: str) -> int | None:
@@ -71,13 +88,43 @@ def _heading_level(line: str) -> int | None:
     return len(match.group(1)) if match else None
 
 
-def _reference_section_has_content(lines: list[str], start: int,
-                                   title_level: int | None) -> bool:
-    """参考文献标题后是否存在实质内容；遇同级或更高级标题即视为章节结束。"""
+def _plain_text(line: str) -> str:
+    """去掉 Markdown 标题标记与强调符号，返回行内纯文本。"""
+    text = re.sub(r"^#{1,6}\s*", "", line.strip())
+    return text.replace("*", "").replace("_", "").strip()
+
+
+def _section_has_content(lines: list[str], start: int,
+                         title_level: int | None) -> bool:
+    """章节标题后是否存在实质内容；遇同级或更高级标题即视为章节结束。"""
     for line in lines[start + 1:]:
         level = _heading_level(line)
         if level is not None and (title_level is None or level <= title_level):
             break
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (PIC_ONLY_LINE.match(stripped) or HTML_COMMENT_ONLY.match(stripped)
+                or stripped in RULE_SEPARATOR_LINES):
+            continue
+        return True
+    return False
+
+
+def _catalogue_section_has_content(lines: list[str], start: int,
+                                   title_level: int | None) -> bool:
+    """目录标题后是否存在目录条目。
+
+    普通文本标题（无 Markdown 级别）无法靠标题级别判断章节结束，因此把
+    非目录样式的标题视为正文开始；目录条目本身可能是 Markdown 标题。
+    """
+    for line in lines[start + 1:]:
+        level = _heading_level(line)
+        if level is not None:
+            if title_level is not None and level <= title_level:
+                break
+            if title_level is None and not TOC_ENTRY.match(_plain_text(line)):
+                break
         stripped = line.strip()
         if not stripped:
             continue
@@ -93,12 +140,10 @@ def has_reference(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     lines = report.md_text.splitlines()
     found = False
     for index, line in enumerate(lines):
-        text = re.sub(r"^#{1,6}\s*", "", line.strip())
-        text = text.replace("*", "").replace("_", "").strip()
-        if not REFERENCE_TITLE.match(text):
+        if not REFERENCE_TITLE.match(_plain_text(line)):
             continue
         found = True
-        if not _reference_section_has_content(lines, index, _heading_level(line)):
+        if not _section_has_content(lines, index, _heading_level(line)):
             continue
         score = rule.default_numeric() or 0.0
         return score, rule.comment or f"报告包含参考文献，+{score:g}分。"
@@ -107,11 +152,6 @@ def has_reference(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     return 0.0, "报告未检测到参考文献章节，不加分。"
 
 
-def re_search_toc_heading(text: str) -> bool:
-    return bool(re.search(r"^#{1,3}\s*(目录|contents)\s*$", text, re.IGNORECASE | re.MULTILINE))
-
-
 def count_toc_lines(text: str) -> int:
-    """统计目录样式行数：标题文字 + 点线/空格 + 阿拉伯页码。"""
-    pattern = re.compile(r"^.{1,40}(\.{3,}|…{1,2}|\s{4,})\d{1,3}\s*$")
-    return sum(1 for line in text.splitlines() if pattern.match(line.strip()))
+    """统计目录样式行数：标题文字 + 点线/制表符/连续空格 + 阿拉伯页码。"""
+    return sum(1 for line in text.splitlines() if TOC_ENTRY.match(line.strip()))

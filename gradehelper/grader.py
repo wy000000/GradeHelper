@@ -36,7 +36,7 @@ from .result_paths import (
     resolve_result_path_hint,
 )
 from .rules_engine import run_program_rules
-from .run_log import RunLogMixin, StageLogEntry
+from .run_log import RunLogMixin, StageLogEntry, format_duration
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +78,33 @@ class Grader(RunLogMixin):
     def _ensure_result_writable(result_path: str | Path | None) -> None:
         ensure_result_writable(result_path)
 
+    def _first_report_identity(self, reports_dir: str | Path,
+                               suffix: str) -> tuple[str, str]:
+        """取报告目录中排序第一份合规文件的（课程名, 报告名），用于阶段开始记录的标题。
+
+        找不到合规文件时返回空串对，由标题逻辑回退到占位名。
+        """
+        cfg = self.config
+        for path in sorted(Path(reports_dir).glob(f"*{suffix}")):
+            if path.name.startswith("~$"):
+                continue
+            meta = parse_filename(path, name_format=cfg.paths.report_name_format,
+                                  separator=cfg.paths.report_name_separator,
+                                  suffixes=(suffix,))
+            if meta is not None:
+                return meta[0], meta[4]
+        return "", ""
+
     # ------------------------------------------------------------------ 阶段 1：doc（解析 + 程序规则打分）
 
     def stage_doc(self, reports_dir: str | Path, template: str | Path,
                   skip_images: int = 2, tag_dep: str = "系部专业",
                   output: str | Path | None = None) -> Path:
-        """阶段 doc：解析所有文档 + 程序化规则打分，写入独立结果文件的 result 表（LLM 项先写 0）。"""
+        """阶段 doc：解析所有文档 + 程序化规则打分，写入独立结果文件的 result 表（LLM 项先写 0）。
+
+        运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
+        与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
+        """
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -95,51 +116,64 @@ class Grader(RunLogMixin):
         warning_count = 0
         doc_failed = 0
         save_failed = 0
+        image_total = 0
+        image_kept = 0
         warnings_log: list[str] = []
         claim: ResultFileClaim | None = None
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
+        # 最终未成功的文档（文件全名，按全名去重）：只在阶段总结的「失败文档」里登记
+        failed_documents: list[str] = []
+
+        def _record_failed_doc(name: str) -> None:
+            if name and name not in failed_documents:
+                failed_documents.append(name)
+
+        def _record_event(level: str, message: str, *, count: bool = True) -> None:
+            """把出错/报警信息按时序写入运行日志（保留文档名与出错内容）。
+
+            ``count=True`` 的条目同时计入阶段总结的「中间错误」条数；
+            最终失败用 ``count=False``（已计入失败数，不重复算中间错误）。
+            """
+            if count:
+                warnings_log.append(message)
+            self._append_stage_event(stage="doc", level=level, message=message)
 
         def _on_parse_error(path: Path, exc: Exception) -> None:
-            """单份文档解析失败：按具体文件名追加失败记录。"""
+            """单份文档解析失败（重试后仍失败）：按时序写入错误信息，不再单独写记录。"""
             nonlocal doc_failed
             doc_failed += 1
-            meta = parse_filename(path, name_format=cfg.paths.report_name_format,
-                                  separator=cfg.paths.report_name_separator)
-            self._append_failure_entry(
-                stage="doc",
-                error=str(exc) or exc.__class__.__name__,
-                document=path.name,
-                course=meta[0] if meta else "",
-                tag_dep=tag_dep,
-                report_name=meta[4] if meta else "",
-                student_id=meta[2] if meta else None,
-            )
+            _record_failed_doc(path.name)
+            _record_event(
+                "错误",
+                f"{path.name}: 解析失败（重试后仍失败，已跳过）: "
+                f"{str(exc) or exc.__class__.__name__}",
+                count=False)
 
         def _on_parse_retry(path: Path, exc: Exception, attempt: int) -> None:
-            """单份文档本次解析失败但还会重试：记入运行日志的中间错误。"""
-            warnings_log.append(
+            """单份文档本次解析失败但还会重试：按时序记入运行日志的中间错误。"""
+            _record_event(
+                "警告",
                 f"{path.name}: 第 {attempt} 次解析失败，将重试: "
                 f"{str(exc) or exc.__class__.__name__}")
 
         def _on_save_error(failed: FailedFile) -> None:
-            """单份文档解析产物落盘失败（重试后仍失败）：按原报告文件记录。"""
+            """单份文档解析产物落盘失败（重试后仍失败）：按时序写入错误信息。"""
             nonlocal save_failed
             save_failed += 1
             report = failed.item
-            self._append_failure_entry(
-                stage="doc",
-                error=f"解析产物保存失败: {failed.reason}",
-                report=report,
-                document=Path(report.source_path).name,
-                tag_dep=tag_dep,
-                extra={"环节": "写盘"},
-            )
+            name = Path(report.source_path).name
+            _record_failed_doc(name)
+            _record_event(
+                "错误",
+                f"{name}: 解析产物保存失败（重试后仍失败，已跳过）: {failed.reason}",
+                count=False)
 
         def _on_save_retry(failed: FailedFile) -> None:
-            """单份文档解析产物本次落盘失败但还会重试：记入中间错误。"""
+            """单份文档解析产物本次落盘失败但还会重试：按时序记入中间错误。"""
             report = failed.item
-            warnings_log.append(
+            _record_event(
+                "警告",
                 f"{Path(report.source_path).name}: 第 {failed.attempts} 次保存失败，"
                 f"将重试: {failed.reason}")
 
@@ -148,6 +182,23 @@ class Grader(RunLogMixin):
             # 随后独占占用该文件：运行期间其它程序（如 Excel）只能只读打开，
             # 避免跑到最后写表时才发现文件被锁
             hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
+            # 日志第一步：先记录配置信息（控制台同步输出），再做占用检查与解析
+            start_course, start_report_name = self._first_report_identity(
+                reports_dir, ".docx")
+            self._append_stage_start_entry(
+                stage="doc",
+                course=start_course,
+                tag_dep=tag_dep,
+                report_name=start_report_name,
+                config={
+                    "报告目录": str(reports_dir),
+                    "评分模板": str(template),
+                    "结果文件": str(hint) if hint else "",
+                    "解析并发": f"{parse_workers} 线程",
+                    "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
+                    "跳过图片": f"前 {skip_images} 张",
+                },
+            )
             self._ensure_result_writable(hint)
             claim = ResultFileClaim(hint)
             claim.acquire()
@@ -169,13 +220,19 @@ class Grader(RunLogMixin):
             # 解析出的 md 同步去除空行（落盘与后续阶段使用同一份内容）
             for report in reports:
                 for warning in report.warnings:
-                    warnings_log.append(f"{Path(report.source_path).name}: {warning}")
+                    _record_event("警告",
+                                  f"{Path(report.source_path).name}: {warning}")
                 before = len(report.images)
+                image_total += before
                 report.images = [img for img in report.images if img.index > skip_images]
+                image_kept += len(report.images)
                 report.md_text = strip_blank_lines(
                     remove_skipped_placeholders(report.md_text, skip_images))
                 logger.info("  已解析 %s（图片 %d 张，跳过前 %d 张，剩余 %d 张）",
                             report.base_name, before, skip_images, len(report.images))
+
+            logger.info("【阶段 doc】共解析图片 %d 张（跳过前 %d 张，保留 %d 张）",
+                        image_total, skip_images, image_kept)
 
             # 始终保存解析产物（md 与图片）到与原文件相同路径；
             # 单份保存失败进入异常队列，整批完成后自动重试，不中断其余文档
@@ -193,8 +250,8 @@ class Grader(RunLogMixin):
             logger.info("【阶段 doc】程序化规则评分（逐 rule 批处理）")
             scores, warnings = run_program_rules(reports, rule_items)
             warning_count = len(warnings)
-            warnings_log.extend(warnings)
             for w in warnings:
+                _record_event("警告", w)
                 logger.warning("  %s", w)
 
             # LLM 项分数先写 0，sen 阶段再更新
@@ -208,11 +265,12 @@ class Grader(RunLogMixin):
             claim.retarget(result_path)  # 推断出的结果文件与预设路径不同时补占用
             write_results_atomic(result_path, reports, rule_items, scores,
                                  mode="upsert", claim=claim)
-            logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（LLM 项已预置 0），耗时 %.2f 秒",
-                        result_path, time.perf_counter() - t0)
+            logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（LLM 项已预置 0），耗时 %s",
+                        result_path, format_duration(time.perf_counter() - t0))
             return result_path
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
             error = str(exc) or exc.__class__.__name__
+            _record_event("错误", f"阶段中断: {error}", count=False)
             raise
         finally:
             if claim is not None:
@@ -230,13 +288,16 @@ class Grader(RunLogMixin):
             if warning_count:
                 extra["规则警告"] = f"{warning_count} 条"
             if doc_failed:
-                extra["失败文档"] = f"{doc_failed} 个"
+                extra["解析失败"] = f"{doc_failed} 个"
             if save_failed:
                 extra["保存失败"] = f"{save_failed} 个"
             unanswered = doc_failed + save_failed
             if unanswered:
                 extra["异常队列"] = f"{unanswered} 个文件重试后仍失败"
+            if failed_documents:
+                extra["失败文档"] = "、".join(failed_documents)
             extra["并发"] = f"{parse_workers} 线程"
+            extra["图片"] = f"解析 {image_total} 张 / 保留 {image_kept} 张"
             extra["跳过图片"] = f"前 {skip_images} 张"
             if result_path:
                 extra["结果文件"] = str(result_path)
@@ -257,13 +318,19 @@ class Grader(RunLogMixin):
                 succeeded=len(reports),
                 failed=doc_failed_total,
                 unit="份",
+                # 中间错误已按时序写入日志，总结里只保留条数
+                list_warnings=False,
             ))
 
     # ------------------------------------------------------------------ 阶段 2：pic（vllm 图片识别 + 更新 md）
 
     def stage_pic(self, reports_dir: str | Path, template: str | Path,
                   skip_images: int = 2, tag_dep: str = "系部专业") -> None:
-        """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。"""
+        """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。
+
+        运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
+        与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
+        """
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -278,6 +345,22 @@ class Grader(RunLogMixin):
         warnings_log: list[str] = []
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
+        # 最终未成功的文档（md 文件全名，按全名去重）：只在阶段总结的「失败文档」里登记
+        failed_documents: list[str] = []
+
+        def _record_failed_doc(name: str) -> None:
+            if name and name not in failed_documents:
+                failed_documents.append(name)
+
+        def _record_event(level: str, message: str, *, count: bool = True) -> None:
+            """把出错/报警信息按时序写入运行日志（保留文档名与出错内容）。
+
+            ``count=True`` 的条目同时计入阶段总结的「中间错误」条数；
+            最终失败用 ``count=False``（已计入失败数，不重复算中间错误）。
+            """
+            if count:
+                warnings_log.append(message)
+            self._append_stage_event(stage="pic", level=level, message=message)
 
         # 最终异常（重试后仍失败）：按 md 文件句柄归属
         caption_errors: dict[tuple[str, int], str] = {}
@@ -296,35 +379,30 @@ class Grader(RunLogMixin):
             return str(Path(report.source_path))
 
         def _on_load_error(path: Path, exc: Exception) -> None:
-            """单份 md 加载失败（重试后仍失败）：追加具体文档的失败记录。"""
+            """单份 md 加载失败（重试后仍失败）：按时序写入错误信息，不再单独写记录。"""
             nonlocal load_failed
             load_failed += 1
-            meta = parse_filename(path, name_format=cfg.paths.report_name_format,
-                                  separator=cfg.paths.report_name_separator,
-                                  suffixes=(".md",))
-            self._append_failure_entry(
-                stage="pic",
-                error=str(exc) or exc.__class__.__name__,
-                document=path.name,
-                course=meta[0] if meta else "",
-                tag_dep=tag_dep,
-                report_name=meta[4] if meta else "",
-                student_id=meta[2] if meta else None,
-            )
+            _record_failed_doc(path.name)
+            _record_event(
+                "错误",
+                f"{path.name}: 加载失败（重试后仍失败，已跳过）: "
+                f"{str(exc) or exc.__class__.__name__}",
+                count=False)
 
         def _on_load_retry(path: Path, exc: Exception, attempt: int) -> None:
-            """单份 md 本次加载失败但还会重试：记入中间错误。"""
-            warnings_log.append(
+            """单份 md 本次加载失败但还会重试：按时序记入中间错误。"""
+            _record_event(
+                "警告",
                 f"{path.name}: 第 {attempt} 次加载失败，将重试: "
                 f"{str(exc) or exc.__class__.__name__}")
 
         def _on_caption_error(report: ParsedReport, image: ReportImage,
                               exc: Exception) -> None:
-            """单张图片识别失败：先记入异常队列，重试结束仍失败才写最终记录。"""
+            """单张图片识别失败：记入异常队列，同时按时序写入警告信息。"""
             reason = str(exc) or exc.__class__.__name__
             caption_errors[(_report_key(report), image.index)] = reason
-            warnings_log.append(
-                f"{report.base_name}-P{image.index}: 图片识别失败: {reason}")
+            _record_event("警告",
+                          f"{report.base_name}-P{image.index}: 图片识别失败: {reason}")
             logger.warning("【阶段 pic】图片识别失败 %s-P%d: %s",
                            report.base_name, image.index, reason)
 
@@ -396,13 +474,32 @@ class Grader(RunLogMixin):
                         caption_errors.pop((key, image.index), None)
 
         try:
+            # 日志第一步：先记录配置信息（控制台同步输出），再加载与识图
+            start_course, start_report_name = self._first_report_identity(
+                reports_dir, ".md")
+            self._append_stage_start_entry(
+                stage="pic",
+                course=start_course,
+                tag_dep=tag_dep,
+                report_name=start_report_name,
+                config={
+                    "报告目录": str(reports_dir),
+                    "评分模板": str(template),
+                    "base_url": cfg.vllm.base_url or "（未配置）",
+                    "model": str(cfg.vllm.get_model() or "（未配置）"),
+                    "并发": f"{max(1, cfg.vllm.batch_size)} 线程",
+                    "解析并发": f"{parse_workers} 线程",
+                    "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
+                    "跳过图片": f"前 {skip_images} 张",
+                },
+            )
             logger.info("【阶段 pic】从已保存的 md 与图片加载报告: %s（并发 %d）",
                         reports_dir, parse_workers)
             reports = self._load_reports_for_pic(
                 reports_dir, skip_images, tag_dep=tag_dep,
                 on_error=_on_load_error, workers=parse_workers,
                 max_attempts=max_attempts, on_retry=_on_load_retry,
-                on_warning=warnings_log.append)
+                on_warning=lambda message: _record_event("警告", message))
             if not reports:
                 raise RuntimeError(f"目录中没有找到已保存的 md 文件: {reports_dir}")
 
@@ -411,7 +508,8 @@ class Grader(RunLogMixin):
                 report_by_key[key] = report
                 base_md[key] = report.md_text
                 for warning in report.warnings:
-                    warnings_log.append(f"{Path(report.source_path).name}: {warning}")
+                    _record_event("警告",
+                                  f"{Path(report.source_path).name}: {warning}")
 
             llm_rules_flag = any(r.is_llm for r in read_rules(template))
             if llm_rules_flag:
@@ -477,9 +575,11 @@ class Grader(RunLogMixin):
                 report = report_by_key.get(key)
                 if report is None:
                     continue
-                self._append_failure_entry(
-                    stage="pic", error=f"图片识别失败: {reason}", report=report,
-                    extra={"图片": f"P{index}"})
+                _record_failed_doc(Path(report.source_path).name)
+                _record_event(
+                    "错误",
+                    f"{report.base_name}-P{index}: 图片识别失败（重试后仍失败）: {reason}",
+                    count=False)
             caption_write_failed: list[str] = []
             for (key, index), reason in txt_errors.items():
                 report = report_by_key.get(key)
@@ -488,9 +588,11 @@ class Grader(RunLogMixin):
                 name = f"{report.base_name}-P{index}.txt"
                 caption_write_failed.append(f"{name}: {reason}")
                 logger.error("【阶段 pic】描述写盘失败 %s: %s", name, reason)
-                self._append_failure_entry(
-                    stage="pic", error=f"描述写盘失败: {reason}", report=report,
-                    extra={"图片": f"P{index}", "环节": "写盘"})
+                _record_failed_doc(Path(report.source_path).name)
+                _record_event(
+                    "错误",
+                    f"{name}: 描述写盘失败（重试后仍失败）: {reason}",
+                    count=False)
             md_write_failed: dict[str, str] = {}
             for key, reason in md_errors.items():
                 report = report_by_key.get(key)
@@ -498,9 +600,11 @@ class Grader(RunLogMixin):
                     continue
                 md_write_failed[report.base_name] = reason
                 logger.error("【阶段 pic】md 回写失败 %s: %s", report.base_name, reason)
-                self._append_failure_entry(
-                    stage="pic", error=f"md 回写失败: {reason}", report=report,
-                    extra={"环节": "写盘"})
+                _record_failed_doc(Path(report.source_path).name)
+                _record_event(
+                    "错误",
+                    f"{Path(report.source_path).name}: md 回写失败（重试后仍失败）: {reason}",
+                    count=False)
 
             if caption_failed:
                 logger.error("【阶段 pic】%d 张图片重试后仍识别失败，可重跑 --stage pic 补齐",
@@ -514,10 +618,11 @@ class Grader(RunLogMixin):
                     logger.error("  %s", line)
                 for name, reason in md_write_failed.items():
                     logger.error("  %s.md: %s", name, reason)
-            logger.info("【阶段 pic】完成，图片描述已嵌入 md 并落盘，耗时 %.2f 秒",
-                        time.perf_counter() - t0)
+            logger.info("【阶段 pic】完成，图片描述已嵌入 md 并落盘，耗时 %s",
+                        format_duration(time.perf_counter() - t0))
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
             error = str(exc) or exc.__class__.__name__
+            _record_event("错误", f"阶段中断: {error}", count=False)
             raise
         finally:
             end_dt = datetime.now()
@@ -559,6 +664,8 @@ class Grader(RunLogMixin):
             if pending_count:
                 extra["异常队列"] = f"{pending_count} 项重试后仍失败"
             extra["跳过图片"] = f"前 {skip_images} 张"
+            if failed_documents:
+                extra["失败文档"] = "、".join(failed_documents)
             self._append_stage_log(self._build_stage_entry(
                 stage="pic",
                 reports=reports,
@@ -575,6 +682,8 @@ class Grader(RunLogMixin):
                 succeeded=success,
                 failed=failed,
                 unit=unit,
+                # 中间错误已按时序写入日志，总结里只保留条数
+                list_warnings=False,
             ))
 
     # ------------------------------------------------------------------ 阶段 3：sen（llm 语义评分 + 更新 result 表）
@@ -582,7 +691,11 @@ class Grader(RunLogMixin):
     def stage_sen(self, reports_dir: str | Path, template: str | Path,
                   output: str | Path | None = None, skip_images: int = 2,
                   tag_dep: str = "系部专业") -> Path:
-        """阶段 sen：llm 语义评分（单文件批量），写入独立结果文件的 result 表。"""
+        """阶段 sen：llm 语义评分（单文件批量），写入独立结果文件的 result 表。
+
+        运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
+        与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
+        """
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -597,6 +710,13 @@ class Grader(RunLogMixin):
         completed_reports: list[ParsedReport] = []
         load_failed = 0
         grade_failed = 0
+        # 最终失败文档：md 全名（课程-班级-学号-姓名-报告名.md），按全名去重，重试多轮只计一次
+        failed_documents: list[str] = []
+        failed_seen: set[str] = set()
+        # 重试期间仍未成功的文档：md 全名 -> 最近一次失败原因（只用于判断是否重试成功）
+        retrying: dict[str, str] = {}
+        # 重试后成功的文档：不计入失败数，仅作为说明写入日志
+        recovered: list[str] = []
         warnings_log: list[str] = []
         failed_report: ParsedReport | None = None
         claim: ResultFileClaim | None = None
@@ -610,48 +730,79 @@ class Grader(RunLogMixin):
         # 无 LLM 评分项时分数不会变化，跳过结尾的冗余写表
         write_needed = True
 
+        def _doc_name(report: ParsedReport) -> str:
+            """失败文档的全名：本阶段实际处理的 md 文件名（课程-班级-学号-姓名-报告名.md）。"""
+            return Path(report.source_path).name
+
+        def _record_failed(label: str) -> bool:
+            """登记最终失败文档（md 全名）；已登记的不重复计数。"""
+            if label in failed_seen:
+                return False
+            failed_seen.add(label)
+            failed_documents.append(label)
+            return True
+
+        def _record_event(level: str, message: str, *, count: bool = True) -> None:
+            """把出错/报警信息按时序写入运行日志（保留文档名与出错内容）。
+
+            ``count=True`` 的条目同时计入阶段总结的「中间错误」条数；
+            最终失败用 ``count=False``（已计入失败数，不重复算中间错误）。
+            """
+            if count:
+                warnings_log.append(message)
+            self._append_stage_event(stage="sen", level=level, message=message)
+
+        def _mark_retrying(label: str, reason: str) -> None:
+            """登记重试中的失败项：失败数不重复累计，中间错误按时序写入日志、不省略。"""
+            retrying[label] = reason
+            _record_event("警告", f"{label}: {reason}")
+
+        def _mark_recovered(label: str) -> None:
+            """重试成功：从失败计数中移除，并记为「重试成功」。"""
+            if retrying.pop(label, None) is not None and label not in recovered:
+                recovered.append(label)
+
         def _on_load_error(path: Path, exc: Exception) -> None:
-            """单份 md 加载失败：追加具体文档的失败记录。"""
+            """单份 md 最终加载失败：按时序写入错误信息，不再单独写失败记录。"""
             nonlocal load_failed
-            load_failed += 1
-            meta = parse_filename(path, name_format=cfg.paths.report_name_format,
-                                  separator=cfg.paths.report_name_separator,
-                                  suffixes=(".md",))
-            self._append_failure_entry(
-                stage="sen",
-                error=str(exc) or exc.__class__.__name__,
-                document=path.name,
-                course=meta[0] if meta else "",
-                tag_dep=tag_dep,
-                report_name=meta[4] if meta else "",
-                student_id=meta[2] if meta else None,
-            )
+            label = path.name
+            retrying.pop(label, None)  # 转为最终失败，不再算重试中
+            if _record_failed(label):
+                load_failed += 1
+            _record_event(
+                "错误",
+                f"{label}: 加载失败（重试后仍失败，已跳过）: "
+                f"{str(exc) or exc.__class__.__name__}",
+                count=False)
 
         def _on_load_retry(path: Path, exc: Exception, attempt: int) -> None:
-            """单份 md 本次加载失败但还会重试：记入中间错误。"""
-            warnings_log.append(
-                f"{path.name}: 第 {attempt} 次加载失败，将重试: "
-                f"{str(exc) or exc.__class__.__name__}")
+            """单份 md 本次加载失败但还会重试：记入中间错误（每轮都保留）。"""
+            _mark_retrying(
+                path.name,
+                f"第 {attempt} 次加载失败: {str(exc) or exc.__class__.__name__}")
 
         def _on_grade_failure(failed: FailedFile) -> None:
-            """单份报告评分失败（重试后仍失败）：记录后继续处理其它报告。"""
+            """单份报告评分失败（重试后仍失败）：按时序写入错误信息，继续其它报告。"""
             nonlocal grade_failed, failed_report
-            grade_failed += 1
             report = failed.item
+            label = _doc_name(report)
+            retrying.pop(label, None)  # 转为最终失败，不再算重试中
+            if _record_failed(label):
+                grade_failed += 1
             if failed_report is None:
                 failed_report = report
-            logger.error("【阶段 sen】评分失败 %s: %s", report.base_name, failed.reason)
-            self._append_failure_entry(
-                stage="sen",
-                error=failed.reason,
-                report=report,
-            )
+            logger.error("【阶段 sen】评分失败 %s: %s", label, failed.reason)
+            _record_event(
+                "错误",
+                f"{label}: 评分失败（重试后仍失败，已跳过）: {failed.reason}",
+                count=False)
 
         def _on_grade_retry(failed: FailedFile) -> None:
-            """单份报告本次评分失败但还会重试：记入中间错误。"""
+            """单份报告本次评分失败但还会重试：记入中间错误（每轮都保留）。"""
             report = failed.item
-            warnings_log.append(
-                f"{report.base_name}: 第 {failed.attempts} 次评分失败，将重试: {failed.reason}")
+            _mark_retrying(
+                _doc_name(report),
+                f"第 {failed.attempts} 次评分失败: {failed.reason}")
 
         def _grade_one(
             report: ParsedReport,
@@ -678,6 +829,26 @@ class Grader(RunLogMixin):
             # 结果文件被 Excel 等程序占用时立即提示退出，不做评分与写表；
             # 随后独占占用该文件：运行期间其它程序（如 Excel）只能只读打开
             hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
+            # 日志第一步：先记录配置信息（控制台同步输出），再做占用检查与评分
+            start_course, start_report_name = self._first_report_identity(
+                reports_dir, ".md")
+            self._append_stage_start_entry(
+                stage="sen",
+                course=start_course,
+                tag_dep=tag_dep,
+                report_name=start_report_name,
+                config={
+                    "报告目录": str(reports_dir),
+                    "评分模板": str(template),
+                    "结果文件": str(hint) if hint else "",
+                    "base_url": cfg.llm.base_url or "（未配置）",
+                    "model": str(cfg.llm.get_model() or "（未配置）"),
+                    "并发": f"{max(1, cfg.llm.batch_size)} 线程",
+                    "解析并发": f"{parse_workers} 线程",
+                    "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
+                    "跳过图片": f"前 {skip_images} 张",
+                },
+            )
             self._ensure_result_writable(hint)
             claim = ResultFileClaim(hint)
             claim.acquire()
@@ -691,11 +862,14 @@ class Grader(RunLogMixin):
                 reports_dir, skip_images, tag_dep=tag_dep,
                 on_error=_on_load_error, workers=parse_workers,
                 max_attempts=max_attempts, stage="sen", on_retry=_on_load_retry,
-                on_warning=warnings_log.append)
+                on_warning=lambda message: _record_event("警告", message))
 
             for report in reports:
+                # 之前加载失败的文档重试成功后，从失败计数中移除
+                _mark_recovered(_doc_name(report))
                 for warning in report.warnings:
-                    warnings_log.append(f"{Path(report.source_path).name}: {warning}")
+                    _record_event("警告",
+                                  f"{Path(report.source_path).name}: {warning}")
 
             # 独立结果文件路径（与 doc 阶段同一解析逻辑，读写同一文件）
             result_path = self._resolve_result_path(template, reports, output)
@@ -767,6 +941,8 @@ class Grader(RunLogMixin):
                     report, row = result
                     final_scores[report.student_id] = row
                     completed_reports.append(report)
+                    # 之前评分失败、重试成功的文档不再计入失败数
+                    _mark_recovered(_doc_name(report))
                     logger.debug("【阶段 sen】已完成 ID %s", report.student_id)
                     if (len(completed_reports) % checkpoint_every == 0
                             and len(completed_reports) >= checkpoint_retry_at):
@@ -782,7 +958,8 @@ class Grader(RunLogMixin):
                             checkpoint_failures += 1
                             # 冷却一批再试：一次瞬时占用不至于让整个阶段退化为只在结束时写
                             checkpoint_retry_at = len(completed_reports) + checkpoint_every
-                            warnings_log.append(
+                            _record_event(
+                                "警告",
                                 f"实时回写失败（将在下一批后重试）: {save_exc}")
                             logger.warning(
                                 "【阶段 sen】实时回写失败（将在下一批后重试，"
@@ -794,7 +971,7 @@ class Grader(RunLogMixin):
                     worker=lambda report: _grade_one(report, client, llm_rules),
                     workers=max(1, cfg.llm.batch_size),
                     path_of=lambda report: Path(report.source_path),
-                    label_of=lambda report: report.student_id,
+                    label_of=_doc_name,
                     unit="份",
                     on_success=_on_graded,
                     on_failure=_on_grade_failure,
@@ -813,20 +990,21 @@ class Grader(RunLogMixin):
                     out = write_results_atomic(
                         result_path, successful_reports, rule_items, final_scores,
                         mode="strict", claim=claim)
-                    logger.info("【阶段 sen】完成，最终评分已写入: %s，耗时 %.2f 秒", out,
-                                time.perf_counter() - t0)
+                    logger.info("【阶段 sen】完成，最终评分已写入: %s，耗时 %s", out,
+                                format_duration(time.perf_counter() - t0))
                 else:
                     out = result_path
                     logger.error("【阶段 sen】没有任何报告成功评分，结果文件未更新: %s", out)
             else:
                 out = result_path
-                logger.info("【阶段 sen】无 LLM 评分项，结果文件无需更新: %s，耗时 %.2f 秒",
-                            out, time.perf_counter() - t0)
+                logger.info("【阶段 sen】无 LLM 评分项，结果文件无需更新: %s，耗时 %s",
+                            out, format_duration(time.perf_counter() - t0))
             return out
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt
             error = str(exc) or exc.__class__.__name__
             # 中断/失败：先停掉在飞生成，再保存已经完整拿到结果的报告
             self.cancel()
+            _record_event("错误", f"阶段中断: {error}", count=False)
             if (write_needed and completed_reports and result_path is not None
                     and rule_items):
                 try:
@@ -839,6 +1017,8 @@ class Grader(RunLogMixin):
                     )
                 except Exception as save_exc:  # noqa: BLE001 保存失败不掩盖原始异常
                     logger.error("【阶段 sen】保存已完成评分失败: %s", save_exc)
+                    _record_event("错误", f"保存已完成评分失败: {save_exc}",
+                                  count=False)
             raise
         finally:
             if claim is not None:
@@ -849,6 +1029,7 @@ class Grader(RunLogMixin):
             sen_success = len(completed_reports)
             sen_total = len(reports) + load_failed
             sen_pending = max(0, sen_total - sen_success - sen_failed)
+            failed_docs_text = "、".join(failed_documents)
             extra: dict[str, str] = {
                 "报告": (f"处理 {sen_total} 份 / 成功 {sen_success} 份 / "
                          f"失败 {sen_failed} 份"),
@@ -859,6 +1040,8 @@ class Grader(RunLogMixin):
             }
             if sen_pending:
                 extra["未完成"] = f"{sen_pending} 份"
+            if recovered:
+                extra["重试成功"] = f"{len(recovered)} 份（{'、'.join(recovered)}）"
             if rule_items:
                 extra["规则项"] = str(len(rule_items))
             if load_failed:
@@ -866,12 +1049,14 @@ class Grader(RunLogMixin):
             if grade_failed:
                 extra["评分失败"] = f"{grade_failed} 份"
                 extra["异常队列"] = f"{grade_failed} 份重试后仍失败"
+            if failed_documents:
+                extra["失败文档"] = failed_docs_text
             if result_path:
                 extra["结果文件"] = str(result_path)
             extra["跳过图片"] = f"前 {skip_images} 张"
             if checkpoint_failures:
                 extra["实时回写"] = f"失败 {checkpoint_failures} 次"
-            self._append_stage_log(self._build_stage_entry(
+            entry = self._build_stage_entry(
                 stage="sen",
                 reports=reports,
                 tag_dep=tag_dep,
@@ -885,12 +1070,28 @@ class Grader(RunLogMixin):
                 template=template,
                 output=result_path,
                 title_report=failed_report,
-                document=(failed_report.base_name if failed_report is not None else ""),
+                document=(_doc_name(failed_report)
+                          if failed_report is not None else ""),
                 processed=sen_total,
                 succeeded=sen_success,
                 failed=sen_failed,
                 unit="份",
-            ))
+                # 中间错误已按时序写入日志，总结里只保留条数
+                list_warnings=False,
+            )
+
+            # 控制台汇总：处理/成功/失败份数与失败文档全名（阶段中断时也输出已统计的部分）；
+            # 先输出一行汇总，随后输出与 log 完全相同的总结块，让控制台以总结收尾
+            if sen_total:
+                summary = (f"【阶段 sen】处理 {sen_total} 份文档：成功 {sen_success} 份，"
+                           f"失败 {sen_failed} 份")
+                if failed_docs_text:
+                    summary += f"；失败文档：{failed_docs_text}"
+                if sen_failed or error is not None:
+                    logger.error("%s", summary)
+                else:
+                    logger.info("%s", summary)
+            self._append_stage_log(entry)
 
     # ------------------------------------------------------------------ 总流程调度
 

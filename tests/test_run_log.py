@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gradehelper.config import AppConfig, PathsConfig  # noqa: E402
 from gradehelper.grader import Grader, StageLogEntry  # noqa: E402
 from gradehelper.models import ParsedReport  # noqa: E402
+from gradehelper.run_log import format_duration  # noqa: E402
 
 
 def _report(course: str = "云安全", student_id: str = "2021001",
@@ -27,6 +28,15 @@ def _report(course: str = "云安全", student_id: str = "2021001",
         md_text="正文",
         tag_dep=tag_dep,
     )
+
+
+class TestFormatDuration(unittest.TestCase):
+    def test_hms(self):
+        self.assertEqual(format_duration(0), "00:00:00")
+        self.assertEqual(format_duration(5.9), "00:00:05")
+        self.assertEqual(format_duration(60), "00:01:00")
+        self.assertEqual(format_duration(3661), "01:01:01")
+        self.assertEqual(format_duration(-10), "00:00:00")
 
 
 class TestStageLogEntry(unittest.TestCase):
@@ -121,6 +131,7 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertTrue(first.startswith("历史记录\n"))
         self.assertIn("云安全-计算机系-课程报告-doc", first)
         self.assertIn("\u8fd0\u884c\u5f00\u59cb:", first)
+        self.assertIn("用时: 00:01:00", first)
         self.assertIn("状态: 成功", first)
         self.assertTrue(self.grader.stage_logs[0].record_time)
 
@@ -193,6 +204,7 @@ class TestAppendRunLog(unittest.TestCase):
         )
         text = self._read()
         self.assertIn("GradeHelper \u8fd0\u884c\u65e5\u5fd7", text)
+        self.assertIn("总用时: 00:02:05", text)
         self.assertIn("\u6267\u884c\u9636\u6bb5: doc", text)
         self.assertIn("\u72b6\u6001: \u6210\u529f", text)
         self.assertLess(text.index("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), text.index("-doc"))
@@ -446,6 +458,87 @@ class TestLogFileName(unittest.TestCase):
         path = self._grader(log_path=str(custom))._resolve_log_path(
             self.template, self.reports, "计算机系")
         self.assertEqual(path, custom)
+
+
+class TestStageStartAndEvent(unittest.TestCase):
+    """阶段开始的配置记录、按时序的出错/报警条目、总结的中间错误条数开关。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.grader = Grader(AppConfig(paths=PathsConfig()))
+        self.grader._log_path = self.tmp / "run.log"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _read(self) -> str:
+        return self.grader._log_path.read_text(encoding="utf-8")
+
+    def test_start_entry_records_config(self):
+        self.grader._append_stage_start_entry(
+            stage="sen", course="云安全", tag_dep="计算机系",
+            report_name="课程报告",
+            config={"报告目录": str(self.tmp), "base_url": "http://llm.test",
+                    "结果文件": ""},
+        )
+        text = self._read()
+        self.assertTrue(text.startswith("=" * 60))
+        self.assertIn("云安全-计算机系-课程报告-sen", text)
+        self.assertIn("执行阶段: sen", text)
+        self.assertIn("记录时间: ", text)
+        self.assertIn(f"报告目录: {self.tmp}", text)
+        self.assertIn("base_url: http://llm.test", text)
+        self.assertNotIn("结果文件:", text)  # 空配置不写行
+        self.assertIn("状态: 开始", text)
+        self.assertTrue(text.rstrip().endswith("=" * 60))
+
+    def test_events_are_appended_in_time_order(self):
+        self.grader._append_stage_event(
+            stage="sen", level="警告",
+            message="2021002.md: 第 1 次评分失败: 临时失败")
+        self.grader._append_stage_event(
+            stage="sen", level="错误",
+            message="2021002.md: 评分失败（重试后仍失败，已跳过）: 始终失败")
+        text = self._read()
+        warn_pos = text.find("级别: 警告")
+        error_pos = text.find("级别: 错误")
+        self.assertGreater(warn_pos, 0)
+        self.assertGreater(error_pos, warn_pos)
+        self.assertIn("2021002.md: 第 1 次评分失败: 临时失败", text)
+        self.assertIn("2021002.md: 评分失败（重试后仍失败，已跳过）: 始终失败", text)
+        self.assertEqual(text.count("记录时间: "), 2)
+
+    def test_summary_keeps_warning_count_only_when_disabled(self):
+        entry = StageLogEntry(
+            stage="sen",
+            start_time="2026-11-03 10:00:00",
+            end_time="2026-11-03 10:00:05",
+            duration_seconds=5.0,
+            processed_count=1,
+            start_student_id=None,
+            end_student_id=None,
+            warnings=["2021002.md: 第 1 次评分失败: 临时失败"],
+            list_warnings=False,
+        )
+        self.grader._append_stage_log(entry)
+        text = self._read()
+        self.assertIn("中间错误: 1 条", text)
+        self.assertNotIn("  - 2021002.md", text)
+
+    def test_summary_lists_warning_items_by_default(self):
+        entry = StageLogEntry(
+            stage="doc",
+            start_time="2026-11-03 10:00:00",
+            end_time="2026-11-03 10:00:05",
+            duration_seconds=5.0,
+            processed_count=1,
+            start_student_id=None,
+            end_student_id=None,
+            warnings=["未找到图片文件: P3.png"],
+        )
+        self.grader._append_stage_log(entry)
+        self.assertIn("  - 未找到图片文件: P3.png", self._read())
 
 
 if __name__ == "__main__":

@@ -115,6 +115,8 @@ class TestStageDocCleansMd(unittest.TestCase):
 
         entry = grader.stage_logs[-1]
         self.assertEqual(entry.extra.get("文档"), "处理 1 份 / 成功 1 份 / 失败 0 份")
+        self.assertEqual(entry.extra.get("图片"), "解析 3 张 / 保留 1 张")
+        self.assertEqual(entry.extra.get("跳过图片"), "前 2 张")
         self.assertEqual((entry.processed_count, entry.succeeded_count,
                           entry.failed_count), (1, 1, 0))
 

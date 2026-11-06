@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.models import ParsedReport, RuleItem  # noqa: E402
-from gradehelper.parser import parse_filename  # noqa: E402
+from gradehelper.parser import parse_filename, scan_reports  # noqa: E402
 from gradehelper.rules.structure import (  # noqa: E402
     has_catalogue,
     has_name_id,
@@ -46,6 +47,20 @@ class TestFilename(unittest.TestCase):
         self.assertIsNone(parse_filename(Path("~$云安全-安全2401-2024001-张三.docx")))
 
 
+class TestScanReports(unittest.TestCase):
+    def test_only_top_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            top = root / "云安全-安全2401-2024001-张三-期中报告.docx"
+            top.write_bytes(b"docx")
+            nested_dir = root / "sub"
+            nested_dir.mkdir()
+            nested = nested_dir / "云安全-安全2401-2024002-李四-期中报告.docx"
+            nested.write_bytes(b"docx")
+
+            self.assertEqual(scan_reports(root), [top])
+
+
 class TestStructureRules(unittest.TestCase):
     def test_has_name_id(self):
         rule = make_rule("hasNameID", "-2")
@@ -66,6 +81,30 @@ class TestStructureRules(unittest.TestCase):
         md = "# 报告\n\n## 目录\n一、概述......1\n二、分析......3\n三、总结......5\n\n正文"
         self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
         self.assertEqual(has_catalogue(make_report("没有目录的正文"), rule)[0], 0.0)
+
+    def test_has_catalogue_plain_title_with_tab_entries(self):
+        rule = make_rule("hasCatalogue", "2")
+        md = "封面\n\n目录\n一、概述\t1\n二、分析\t3\n三、总结\t5\n\n## 正文\n正文"
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+
+    def test_has_catalogue_toc_entries_without_heading(self):
+        rule = make_rule("hasCatalogue", "2")
+        md = "封面\n\n一、概述......1\n二、分析......3\n三、总结......5\n\n" + "正文" * 50
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+
+    def test_has_catalogue_plain_title_heading_entries(self):
+        rule = make_rule("hasCatalogue", "2")
+        md = ("封面\n\n目    录\n"
+              "#### 一、事件概述\t2\n#### 1.1 事件经过\t2\n#### 二、问题原因\t4\n\n"
+              "## 一、事件概述\n正文")
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+
+    def test_has_catalogue_empty_section(self):
+        rule = make_rule("hasCatalogue", "2")
+        for md in ("# 报告\n\n## 目录\n\n## 正文\n正文内容",
+                   "# 报告\n\n目录\n\n## 正文\n正文内容",
+                   "封面\n\n## 目录\n"):
+            self.assertEqual(has_catalogue(make_report(md), rule)[0], 0.0, msg=md)
 
     def test_has_reference(self):
         rule = make_rule("hasReference", "2")

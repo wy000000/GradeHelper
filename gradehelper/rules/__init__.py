@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Callable
 
 from ..models import ParsedReport, RuleItem
-from .content import has_requirement, summary_docker, summary_sql, too_many_list
+from .content import has_requirement, too_many_list
 from .similarity import copied
 from .structure import (
     base_score,
@@ -34,8 +34,6 @@ RULE_HANDLERS: dict[str, Callable[[ParsedReport, RuleItem], tuple[float, str]]] 
     "hasCatalogue": has_catalogue,
     "hasReference": has_reference,
     "hasRequirement": has_requirement,
-    "summaryDocker": summary_docker,
-    "summarySql": summary_sql,
 }
 
 # 批处理规则（跨报告）：评分项名 -> handler(reports, rule) -> {学号: (score, comment)}

@@ -81,22 +81,37 @@ def _fmt_clock(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _fmt_hms(seconds: float) -> str:
+    """把秒数格式化为 小时:分钟:秒（HH:MM:SS）。"""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 class ParallelProgress:
     """并行任务进度：同一 stage 的多线程共享一个实例。"""
 
     def __init__(self, stage: str, total: int, *, unit: str = "项",
                  workers: int | None = None, stream: TextIO | None = None,
-                 enabled: bool = True):
+                 enabled: bool = True, retry_mode: bool = False,
+                 initial_failed: int = 0):
+        """``retry_mode``：重试轮次，本轮任务都是之前已失败的文档。
+
+        此时失败数先按 ``initial_failed`` 计入（即本轮待重试数量），
+        同一文档再次失败不重复累计；重试成功后失败数减一。
+        """
         self.stage = stage
         self.total = max(0, int(total))
         self.unit = unit
         self.workers = workers
         self.stream = stream if stream is not None else sys.stderr
         self.enabled = bool(enabled and self.total > 0)
+        self.retry_mode = bool(retry_mode)
 
         self._lock = threading.Lock()
         self._done = 0
-        self._failed = 0
+        self._failed = max(0, int(initial_failed)) if self.retry_mode else 0
         self._inflight = 0
         self._last_label = ""
         self._start = time.monotonic()
@@ -190,7 +205,12 @@ class ParallelProgress:
             self._inflight = max(0, self._inflight - 1)
             if not aborted:
                 self._done += 1
-                if not ok:
+                if ok:
+                    if self.retry_mode and self._failed > 0:
+                        # 重试成功：该文档不再算失败
+                        self._failed -= 1
+                elif not self.retry_mode:
+                    # 重试轮中失败项已计入失败数，不重复累计
                     self._failed += 1
             if label:
                 self._last_label = label
@@ -251,11 +271,11 @@ class ParallelProgress:
             return (
                 f"【{self.stage}】已中断：{done}/{self.total} {self.unit} "
                 f"({pct:.0f}%) | 进行中 {inflight} | 失败 {failed} | "
-                f"耗时 {elapsed:.1f}s"
+                f"耗时 {_fmt_hms(elapsed)}"
             )
         text = (
             f"【{self.stage}】完成 {done}/{self.total} {self.unit} "
-            f"({pct:.0f}%) | 失败 {failed} | 耗时 {elapsed:.1f}s"
+            f"({pct:.0f}%) | 失败 {failed} | 耗时 {_fmt_hms(elapsed)}"
         )
         if rate > 0 and elapsed >= 0.5:
             text += f"，平均 {rate:.2f} {self.unit}/s"

@@ -60,12 +60,12 @@ def scan_reports(
     name_format: str = "{course}-{klass}-{student_id}-{name}",
     separator: str = "-",
 ) -> list[Path]:
-    """扫描目录（含子目录），仅保留文件名格式正确的 docx。"""
+    """扫描目录本身（不含子目录），仅保留文件名格式正确的 docx。"""
     root = Path(reports_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"报告目录不存在: {root}")
     return [
-        p for p in sorted(root.rglob("*"))
+        p for p in sorted(root.iterdir())
         if p.is_file()
         and p.suffix.lower() == DOCX_SUFFIX
         and parse_filename(path=p, name_format=name_format, separator=separator) is not None

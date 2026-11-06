@@ -68,6 +68,24 @@ class TestParallelProgress(unittest.TestCase):
         self.assertEqual(progress.failed, 0)
         self.assertEqual(progress.inflight, 0)
 
+    def test_retry_mode_dedup_and_decrement(self):
+        """重试轮：失败数按待重试数量起始，重复失败不累计，成功则减一。"""
+        progress = ParallelProgress("sen重试", 3, unit="份", stream=io.StringIO(),
+                                    retry_mode=True, initial_failed=3)
+        with progress:
+            with progress.task("ok1"):
+                pass  # 重试成功 → 失败数 3 → 2
+            try:
+                with progress.task("bad"):
+                    raise RuntimeError("仍然失败")  # 已在失败数中，不重复累计
+            except RuntimeError:
+                pass
+            with progress.task("ok2"):
+                pass  # 重试成功 → 失败数 2 → 1
+        self.assertEqual(progress.done, 3)
+        self.assertEqual(progress.failed, 1)
+        self.assertEqual(progress.inflight, 0)
+
     def test_failure_counted_as_done(self):
         progress = ParallelProgress("sen", 3, unit="份", stream=io.StringIO())
         with progress:

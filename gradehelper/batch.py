@@ -145,9 +145,13 @@ def run_file_batch(
         failures = FailureQueue()
         progress_label = progress_stage or stage
         round_stage = progress_label if attempt == 1 else f"{progress_label}重试"
+        # 重试轮中 pending 全是上一轮失败的文档：失败数先按 pending 计入，
+        # 同一文档再次失败不重复累计，重试成功后失败数减一。
         progress = ParallelProgress(
             round_stage, len(pending), unit=unit,
             workers=max(1, int(workers)), enabled=progress_enabled,
+            retry_mode=attempt > 1,
+            initial_failed=len(pending) if attempt > 1 else 0,
         )
         with progress:
             pool = ThreadPoolExecutor(max_workers=max(1, int(workers)))
@@ -221,7 +225,8 @@ def run_file_batch(
             stage, len(failures),
         )
         for failed in failures.values():
-            logger.error("  %s: %s", failed.path.name, failed.reason)
+            logger.error("  %s: %s",
+                         _label(failed.item, path_of, label_of), failed.reason)
         if on_failure is not None:
             for failed in failures.values():
                 try:

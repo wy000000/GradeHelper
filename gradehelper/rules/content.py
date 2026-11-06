@@ -1,4 +1,4 @@
-"""内容规则：tooManyList / hasRequirement / summaryDocker / summarySql。"""
+"""内容规则：tooManyList / hasRequirement。"""
 
 from __future__ import annotations
 
@@ -95,46 +95,3 @@ def window_similarity(text: str, pattern: str, threshold: float = 0.9,
         if matcher.ratio() >= threshold:
             return True
     return False
-
-
-def _last_section(report: ParsedReport, ratio: float = 0.2) -> str:
-    """最后总结部分：正文末尾 ratio 比例，或从“总结”类标题开始。"""
-    text = strip_code(report.md_text)
-    tail = text[int(len(text) * (1 - ratio)):]
-    # 若末尾区域存在总结类标题，从最后一个标题处截取
-    matches = list(re.finditer(r"^#{1,4}.*?(总结|结语|体会|收获|感悟).*$", text, re.MULTILINE))
-    if matches:
-        tail = text[matches[-1].start():]
-    return tail
-
-
-DOCKER_KEYWORDS = ("docker", "容器", "container", "镜像", "image")
-NOSQL_KEYWORDS = ("nosql", "mongodb", "sqlite", "hbase", "非关系型数据库",
-                  "文档数据库", "列存储", "键值")
-
-
-def _match_keyword(text: str, keywords: tuple) -> str:
-    """大小写不敏感的关键字匹配，返回命中的第一个关键字；未命中返回空串。"""
-    low = text.lower()
-    for kw in keywords:
-        if kw.lower() in low:
-            return kw
-    return ""
-
-
-def summary_docker(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """最后总结部分涉及 Docker 相关内容（任一关键字命中）则加分。"""
-    hit = _match_keyword(_last_section(report), DOCKER_KEYWORDS)
-    if hit:
-        score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"总结部分涉及 Docker 相关内容（命中“{hit}”），+{score:g}分。"
-    return 0.0, "总结部分未涉及 Docker 相关内容，不加分。"
-
-
-def summary_sql(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """最后总结部分涉及 NoSQL 相关内容（任一关键字命中）则加分。"""
-    hit = _match_keyword(_last_section(report), NOSQL_KEYWORDS)
-    if hit:
-        score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"总结部分涉及 NoSQL 相关内容（命中“{hit}”），+{score:g}分。"
-    return 0.0, "总结部分未涉及 NoSQL 相关内容，不加分。"

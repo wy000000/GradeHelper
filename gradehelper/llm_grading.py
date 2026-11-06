@@ -16,25 +16,44 @@ def grade_with_llm_batch(client: LLMClient, report: ParsedReport,
 
     失败不自行捕获，异常向上抛出。client.chat_json 内部已按 cfg.max_retries
     重试，耗尽后会抛出 RuntimeError，由 stage_sen / main 决定退出程序。
+
+    JSON 不完整（被截断）一律视为该文档**处理失败**：解析失败、缺少评分项、
+    某一项不是对象、score 缺失或不是数字，都抛 ValueError 交给批处理入队重试，
+    不做“取最低分”之类的静默兜底，避免失败文档被当成评分成功写进结果表。
     """
     items_text = build_llm_items_section(llm_rules)
     prompt = render_llm_batch_prompt(
         batch_prompt, items_text, report.md_text)
     data = client.chat_json([{"role": "user", "content": prompt}])
 
+    if not isinstance(data, dict):
+        raise ValueError(f"LLM 返回的 JSON 不是对象: {type(data).__name__}")
+    missing = [rule.key for rule in llm_rules if rule.key not in data]
+    if missing:
+        raise ValueError(
+            "LLM 返回的 JSON 不完整（可能被截断），缺少评分项: " + "、".join(missing))
+
     result: dict[str, ItemScore] = {}
+    invalid: list[str] = []
     for rule in llm_rules:
-        entry = data.get(rule.key) or {}
+        entry = data.get(rule.key)
+        if not isinstance(entry, dict):
+            invalid.append(f"{rule.key}（返回的不是对象: {type(entry).__name__}）")
+            continue
         score = to_float(entry.get("score"))
         if score is None:
-            lo, _ = rule.score_range()
-            score = lo if lo is not None else 0.0
+            invalid.append(f"{rule.key}（score 缺失或不是数字）")
+            continue
         confidence = to_float(entry.get("confidence"))
         comment = str(entry.get("comment") or rule.comment or "").strip()
         result[rule.key] = ItemScore(key=rule.key, score=score,
                                      confidence=confidence, comment=comment)
         logger.info("  %s / %s -> score=%s confidence=%s (batch)",
                     report.student_id, rule.key, score, confidence)
+    if invalid:
+        raise ValueError(
+            "LLM 返回的 JSON 数据不完整（可能被截断），视为处理失败: "
+            + "、".join(invalid))
     return result
 
 
