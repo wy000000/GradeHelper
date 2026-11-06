@@ -10,7 +10,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.models import ParsedReport, RuleItem  # noqa: E402
 from gradehelper.parser import parse_filename  # noqa: E402
-from gradehelper.rules.structure import has_catalogue, has_name_id, redundant_rname  # noqa: E402
+from gradehelper.rules.structure import (  # noqa: E402
+    has_catalogue,
+    has_name_id,
+    has_reference,
+    redundant_rname,
+)
 
 
 def make_report(md: str, sid: str = "2024001", name: str = "张三",
@@ -61,6 +66,37 @@ class TestStructureRules(unittest.TestCase):
         md = "# 报告\n\n## 目录\n一、概述......1\n二、分析......3\n三、总结......5\n\n正文"
         self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
         self.assertEqual(has_catalogue(make_report("没有目录的正文"), rule)[0], 0.0)
+
+    def test_has_reference(self):
+        rule = make_rule("hasReference", "2")
+        md = "# 报告\n\n## 参考文献\n[1] 张三. 云安全研究[J]. 2024."
+        self.assertEqual(has_reference(make_report(md), rule)[0], 2.0)
+
+    def test_has_reference_plain_and_numbered_title(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("正文\n\n**参考文献**\n[1] 文献一", "正文\n\n六、参考文献\n[1] 文献一",
+                   "正文\n\nReferences\n[1] A paper", "正文\n\n参考文献：\n[1] 文献一"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+
+    def test_has_reference_score_comes_from_rule_default(self):
+        md = "正文\n\n## 参考文献\n[1] 文献一"
+        for default, expected in (("2", 2.0), ("5", 5.0), ("3.5", 3.5)):
+            rule = make_rule("hasReference", default)
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected,
+                             msg=f"默认值 {default}")
+
+    def test_has_reference_empty_section(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("正文\n\n## 参考文献", "正文\n\n## 参考文献\n\n",
+                   "正文\n\n## 参考文献\n\n## 附录\n附录内容",
+                   "正文\n\n参考文献：\n\n"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 0.0, msg=md)
+
+    def test_has_reference_absent(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("没有参考文献的正文", "本文参考文献将在后续补充。",
+                   "参考文献......12\n正文"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 0.0, msg=md)
 
 
 class TestRuleRange(unittest.TestCase):

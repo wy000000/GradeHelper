@@ -17,7 +17,13 @@ from typing import Callable
 from ..models import ParsedReport, RuleItem
 from .content import has_requirement, summary_docker, summary_sql, too_many_list
 from .similarity import copied
-from .structure import base_score, has_catalogue, has_name_id, redundant_rname
+from .structure import (
+    base_score,
+    has_catalogue,
+    has_name_id,
+    has_reference,
+    redundant_rname,
+)
 
 # 单报告规则：评分项名 -> handler(report, rule) -> (score, comment)
 RULE_HANDLERS: dict[str, Callable[[ParsedReport, RuleItem], tuple[float, str]]] = {
@@ -26,6 +32,7 @@ RULE_HANDLERS: dict[str, Callable[[ParsedReport, RuleItem], tuple[float, str]]] 
     "redundantRName": redundant_rname,
     "tooManyList": too_many_list,
     "hasCatalogue": has_catalogue,
+    "hasReference": has_reference,
     "hasRequirement": has_requirement,
     "summaryDocker": summary_docker,
     "summarySql": summary_sql,

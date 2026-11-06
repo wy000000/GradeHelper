@@ -1,4 +1,4 @@
-"""结构性规则：baseScore / hasNameID / redundantRName / hasCatalogue。"""
+"""结构性规则：baseScore / hasNameID / redundantRName / hasCatalogue / hasReference。"""
 
 from __future__ import annotations
 
@@ -49,6 +49,62 @@ def has_catalogue(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
         score = rule.default_numeric() or 0.0
         return score, rule.comment or f"报告包含目录，+{score:g}分。"
     return 0.0, "报告未检测到目录，不加分。"
+
+
+REFERENCE_TITLE = re.compile(
+    r"^(?:"
+    r"第?[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
+    r"|\d+(?:\.\d+)*\s*[、.．,，:：)]?\s*"
+    r")?"
+    r"(?:参考文献|参考资料|references?|bibliography|works\s+cited)"
+    r"(?:\s*[（(][^）)]*[)）])?\s*[:：]?$",
+    re.IGNORECASE,
+)
+MD_HEADING = re.compile(r"^(#{1,6})\s+\S")
+PIC_ONLY_LINE = re.compile(r"^\[\[PIC:[^\]]+\]\]$")
+HTML_COMMENT_ONLY = re.compile(r"^<!--.*-->$")
+RULE_SEPARATOR_LINES = {"---", "***", "___"}
+
+
+def _heading_level(line: str) -> int | None:
+    match = MD_HEADING.match(line.strip())
+    return len(match.group(1)) if match else None
+
+
+def _reference_section_has_content(lines: list[str], start: int,
+                                   title_level: int | None) -> bool:
+    """参考文献标题后是否存在实质内容；遇同级或更高级标题即视为章节结束。"""
+    for line in lines[start + 1:]:
+        level = _heading_level(line)
+        if level is not None and (title_level is None or level <= title_level):
+            break
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (PIC_ONLY_LINE.match(stripped) or HTML_COMMENT_ONLY.match(stripped)
+                or stripped in RULE_SEPARATOR_LINES):
+            continue
+        return True
+    return False
+
+
+def has_reference(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
+    """包含参考文献：存在“参考文献”章节标题且章节内容非空。"""
+    lines = report.md_text.splitlines()
+    found = False
+    for index, line in enumerate(lines):
+        text = re.sub(r"^#{1,6}\s*", "", line.strip())
+        text = text.replace("*", "").replace("_", "").strip()
+        if not REFERENCE_TITLE.match(text):
+            continue
+        found = True
+        if not _reference_section_has_content(lines, index, _heading_level(line)):
+            continue
+        score = rule.default_numeric() or 0.0
+        return score, rule.comment or f"报告包含参考文献，+{score:g}分。"
+    if found:
+        return 0.0, "报告参考文献章节为空，不加分。"
+    return 0.0, "报告未检测到参考文献章节，不加分。"
 
 
 def re_search_toc_heading(text: str) -> bool:
