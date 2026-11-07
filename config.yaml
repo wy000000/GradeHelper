@@ -3,15 +3,15 @@
 endpoints:
   # 通用 LLM 评分端点（OpenAI 兼容接口；不限定本地或 llama 实现）
   llm:
-    # connection:            # local
-    #   base_url: "http://localhost:8080/"
-    #   model: "qwen35-thinking-coding"
-    #   api_key: ""    # OpenAI 兼容鉴权密钥；本地无鉴权时留空 
+    connection:            # local
+      base_url: "http://localhost:8080/"
+      model: "qwen35-thinking-coding"
+      api_key: ""    # OpenAI 兼容鉴权密钥；本地无鉴权时留空 
     
-    connection:            # mimo
-      base_url: "https://api.xiaomimimo.com/v1"
-      model: "mimo-v2.6-flash"
-      api_key: "sk-cqq74wp56s6wy2xtovazs0eqh69ho5j3viy356ljzozt1n4g"
+    # connection:            # mimo
+    #   base_url: "https://api.xiaomimimo.com/v1"
+    #   model: "mimo-v2.6-flash"
+    #   api_key: ""
     
     # connection:            # deepseek
     #   base_url: "https://api.deepseek.com"
