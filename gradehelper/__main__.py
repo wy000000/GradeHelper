@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage = "doc"
     stage = "pic"
     stage = "sen"
-    stage = "full"
+    # stage = "full"
     skip_images = 2
     
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")

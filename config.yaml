@@ -3,20 +3,20 @@
 endpoints:
   # 通用 LLM 评分端点（OpenAI 兼容接口；不限定本地或 llama 实现）
   llm:
-    # connection:            # mimo
-    #   base_url: "https://api.xiaomimimo.com/v1"
-    #   model: "mimo-v2.6-flash"
-    #   api_key: ""
+    # connection:            # local
+    #   base_url: "http://localhost:8080/"
+    #   model: "qwen35-thinking-coding"
+    #   api_key: ""    # OpenAI 兼容鉴权密钥；本地无鉴权时留空 
+    
+    connection:            # mimo
+      base_url: "https://api.xiaomimimo.com/v1"
+      model: "mimo-v2.6-flash"
+      api_key: "sk-cqq74wp56s6wy2xtovazs0eqh69ho5j3viy356ljzozt1n4g"
     
     # connection:            # deepseek
     #   base_url: "https://api.deepseek.com"
     #   model: "deepseek-flash"
     #   api_key: "sk-748a5f9d496749ce912b3032ef760ade"
-    
-    connection:            # local
-      base_url: "http://localhost:8080/"
-      model: "qwen35-thinking-coding"
-      api_key: ""    # OpenAI 兼容鉴权密钥；本地无鉴权时留空      
       
     client:                # 客户端专用参数（不会发送给 API）
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
@@ -69,7 +69,7 @@ endpoints:
 
 paths:
   reports_dir: "D:/AI/Reports/"                        # 报告所在目录
-  template: "云安全-课程报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
+  template: "云安全-docker实验报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
   output: ""                                      # 结果输出 xlsx；留空表示按 result_name_format 生成（与模板同目录）
   captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
   save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）

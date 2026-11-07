@@ -155,10 +155,26 @@ class TestAppendRunLog(unittest.TestCase):
         )
         self.grader._append_stage_log(entry)
         text = self._read()
-        self.assertIn("共处理: 2 份", text)
+        self.assertIn("共处理: 2 份\n", text)  # 只计文档时不带构成说明
         self.assertIn("成功: 1 份", text)
         self.assertIn("失败: 1 份", text)
         self.assertIn("状态: 部分失败 - 失败 1 条", text)
+
+    def test_mixed_total_shows_breakdown(self):
+        """pic 的合计是文档+图片：共处理行必须写明构成，避免与分项数字对不上。"""
+        entry = self.grader._build_stage_entry(
+            stage="pic", reports=[_report(student_id="2021001")], tag_dep="计算机系",
+            start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+            extra={"文档": "处理 4 份 / 成功 4 份 / 失败 0 份",
+                   "图片": "处理 41 张 / 成功 41 张 / 失败 0 张"},
+            processed=45, succeeded=45, failed=0, unit="条",
+            processed_note="文档 4 份 + 图片 41 张",
+        )
+        self.grader._append_stage_log(entry)
+        text = self._read()
+        self.assertIn("共处理: 45 条（文档 4 份 + 图片 41 张）", text)
+        self.assertIn("成功: 45 条\n", text)
+        self.assertIn("图片: 处理 41 张 / 成功 41 张 / 失败 0 张", text)
 
     def test_all_failed_stage_status(self):
         entry = self.grader._build_stage_entry(
@@ -169,15 +185,19 @@ class TestAppendRunLog(unittest.TestCase):
         self.grader._append_stage_log(entry)
         self.assertIn("状态: 失败 - 2 条全部失败", self._read())
 
-    def test_run_footer_not_success_when_stage_has_failures(self):
+    def test_stage_record_status_not_success_when_has_failures(self):
+        """没有独立的运行尾记录：部分失败的状态由阶段记录本身给出。"""
         entry = self.grader._build_stage_entry(
             stage="doc", reports=[_report(student_id="2021001")], tag_dep="计算机系",
             start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
             processed=2, succeeded=1, failed=1,
         )
         self.grader._append_stage_log(entry)
-        self.grader._append_run_footer(start_dt=self.start, elapsed=1.0, error=None)
-        self.assertIn("状态: 部分失败 - 共 1 条失败", self._read())
+        text = self._read()
+        self.assertIn("状态: 部分失败 - 失败 1 条", text)
+        # 运行级的结束/总用时不再单独写一块（信息与阶段记录重复）
+        self.assertNotIn("运行结束:", text)
+        self.assertNotIn("总用时:", text)
 
     def test_intermediate_warnings_are_logged(self):
         entry = self.grader._build_stage_entry(
@@ -193,29 +213,36 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertIn("未找到图片文件: P3.png", text)
         self.assertIn("状态: 成功（有警告）", text)
 
-    def test_run_header_and_footer(self):
+    def test_run_header_and_stage(self):
         self.grader._append_run_header(
             stage="full", reports_dir=self.tmp / "reports",
             template=self.tmp / "\u6a21\u677f.xlsx", output=None,
         )
         self.grader._append_stage_log(self._entry("doc", "2021001"))
-        self.grader._append_run_footer(
-            start_dt=self.start, elapsed=125.5, error=None,
-        )
         text = self._read()
         self.assertIn("GradeHelper \u8fd0\u884c\u65e5\u5fd7", text)
-        self.assertIn("总用时: 00:02:05", text)
+        self.assertIn("用时: 00:01:00", text)
         self.assertIn("\u6267\u884c\u9636\u6bb5: doc", text)
         self.assertIn("\u72b6\u6001: \u6210\u529f", text)
         self.assertLess(text.index("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), text.index("-doc"))
         self.assertLess(text.index("-doc"), text.index("\u72b6\u6001: \u6210\u529f"))
 
-    def test_run_footer_reports_failure(self):
-        self.grader._append_run_footer(
-            start_dt=self.start, elapsed=1.0, error="KeyboardInterrupt",
+        # 只有运行头 + 阶段记录：状态/用时不再由运行尾重复输出一遍
+        self.assertEqual(text.count("状态: 成功"), 1)
+        self.assertNotIn("运行结束:", text)
+        self.assertNotIn("总用时:", text)
+
+    def test_stage_failure_status_kept_in_stage_record(self):
+        """阶段失败时状态写在阶段记录里，不再单独写运行尾记录。"""
+        self.grader._append_run_header(
+            stage="sen", reports_dir=self.tmp / "reports",
+            template=self.tmp / "\u6a21\u677f.xlsx", output=None,
         )
+        self.grader._append_stage_log(
+            self._entry("sen", "2021001", error="KeyboardInterrupt"))
         text = self._read()
-        self.assertIn("状态: 失败/中断 - KeyboardInterrupt", text)
+        self.assertIn("状态: 失败 - KeyboardInterrupt", text)
+        self.assertNotIn("失败/中断", text)
 
     def test_log_write_failure_is_best_effort(self):
         self.grader._log_path = self.tmp  # 目录不是文件，open(..., "a") 会失败
@@ -223,7 +250,7 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertTrue(self.grader._log_failed)
         self.assertEqual(len(self.grader.stage_logs), 1)  # 内存记录仍然保留
 
-    def test_run_appends_header_stage_and_footer(self):
+    def test_run_appends_header_and_stages(self):
         self.log_path.write_text("\u5386\u53f2\u8bb0\u5f55\n", encoding="utf-8")
         calls: list[str] = []
 
@@ -334,6 +361,33 @@ class TestAppendRunLog(unittest.TestCase):
         text = self._read()
         self.assertNotIn("标记: OLD", text)
         self.assertIn("标记: RECENT", text)
+
+    def test_trim_falls_back_to_run_start_without_record_time(self):
+        """阶段记录不再写「记录时间」：清理时回退到「运行开始」判断新旧。"""
+        now = datetime.now()
+        old_start = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        recent_start = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        old_record = (
+            "=" * 60 + "\n"
+            "旧运行-doc\n"
+            f"运行开始: {old_start}\n"
+            + "x" * 40_000 + "\n"
+            + "=" * 60 + "\n\n"
+        )
+        recent_record = (
+            "=" * 60 + "\n"
+            "新运行-doc\n"
+            f"运行开始: {recent_start}\n"
+            + "=" * 60 + "\n\n"
+        )
+        self.log_path.write_text(old_record + recent_record, encoding="utf-8")
+        self.assertGreater(self.log_path.stat().st_size, 32 * 1024)
+
+        self.grader._trim_log()
+
+        text = self._read()
+        self.assertNotIn("旧运行-doc", text)
+        self.assertIn("新运行-doc", text)
 
     def test_trim_drops_old_format_without_record_time(self):
         now = datetime.now()
@@ -486,12 +540,57 @@ class TestStageStartAndEvent(unittest.TestCase):
         self.assertTrue(text.startswith("=" * 60))
         self.assertIn("云安全-计算机系-课程报告-sen", text)
         self.assertIn("执行阶段: sen", text)
-        self.assertIn("记录时间: ", text)
+        self.assertIn("运行开始: ", text)
+        # 记录时间与运行开始同值、状态等阶段结束才写：开始部分不重复输出
+        self.assertNotIn("记录时间:", text)
+        self.assertNotIn("状态: 开始", text)
         self.assertIn(f"报告目录: {self.tmp}", text)
         self.assertIn("base_url: http://llm.test", text)
         self.assertNotIn("结果文件:", text)  # 空配置不写行
-        self.assertIn("状态: 开始", text)
+        # 记录块保持打开：阶段结束时补上处理结果与状态后才闭合
+        self.assertFalse(text.rstrip().endswith("=" * 60))
+
+    def test_summary_does_not_repeat_start_config(self):
+        """一个阶段一条记录：开始部分的标题/配置与结束部分的用时/状态各只出现一次。"""
+        self.grader._append_stage_start_entry(
+            stage="doc", course="云安全", tag_dep="计算机系",
+            report_name="课程报告",
+            config={
+                "报告目录": str(self.tmp),
+                "评分模板": "模板.xlsx",
+                "结果文件": "结果.xlsx",
+                "并发": "4 线程",
+                "跳过图片": "前 2 张",
+            },
+        )
+        entry = self.grader._build_stage_entry(
+            stage="doc", reports=[], tag_dep="计算机系",
+            start_dt=datetime(2026, 11, 3, 10, 0, 0),
+            end_dt=datetime(2026, 11, 3, 10, 0, 1),
+            elapsed=1.0, error=None,
+            extra={"并发": "4 线程", "跳过图片": "前 2 张",
+                   "图片": "解析 1 张 / 保留 1 张"},
+            reports_dir=self.tmp, template="模板.xlsx", output="结果.xlsx",
+        )
+        self.grader._append_stage_log(entry)
+        text = self._read()
+        # 配置信息只出现一次（都在阶段开始部分）
+        for field in ("报告目录", "评分模板", "结果文件", "并发", "跳过图片"):
+            self.assertEqual(text.count(f"{field}: "), 1, field)
+        # 标题、执行阶段、运行开始也不重复
+        self.assertEqual(text.count("云安全-计算机系-课程报告-doc"), 1)
+        self.assertEqual(text.count("执行阶段: doc"), 1)
+        self.assertEqual(text.count("运行开始: "), 1)
+        # 结束部分：处理结果 + 状态 + 闭合分隔线
+        self.assertIn("结束时间: 2026-11-03 10:00:01", text)
+        self.assertIn("用时: 00:00:01", text)
+        self.assertIn("状态: 成功", text)
         self.assertTrue(text.rstrip().endswith("=" * 60))
+        # 记录时间与状态: 开始属于被去掉的重复信息
+        self.assertNotIn("记录时间:", text)
+        self.assertNotIn("状态: 开始", text)
+        # 阶段结果里的信息仍保留
+        self.assertIn("图片: 解析 1 张 / 保留 1 张", text)
 
     def test_events_are_appended_in_time_order(self):
         self.grader._append_stage_event(

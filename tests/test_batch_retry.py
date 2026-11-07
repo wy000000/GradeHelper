@@ -301,7 +301,7 @@ class TestSenRetry(unittest.TestCase):
                              skip_images=0)
 
         text = log_path.read_text(encoding="utf-8")
-        start_pos = text.find("状态: 开始")
+        start_pos = text.find("运行开始: ")
         event_pos = text.find("级别: 警告")
         summary_pos = text.find("用时: ")
         self.assertGreater(start_pos, 0)

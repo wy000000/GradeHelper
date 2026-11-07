@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 _RECORD_TIME_RE = re.compile(
     r"(?m)^记录时间:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$"
 )
+# 阶段记录不再单独写「记录时间」（与「运行开始」同值、属重复信息），只有出错条目带
+# 「记录时间」；一条记录两者都没有时，回退用「运行开始」判断新旧
+_RUN_START_RE = re.compile(
+    r"(?m)^运行开始:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$"
+)
 _SEP_EQ = "=" * 60
 _SEP_DASH = "-" * 60
 _LOG_TITLE = "GradeHelper \u8fd0\u884c\u65e5\u5fd7 Ver " + __version__
@@ -55,6 +60,7 @@ class StageLogEntry:
     succeeded_count: int = 0        # 成功条数
     failed_count: int = 0           # 最终失败条数（同时用于状态判定）
     unit: str = "份"                # 计数单位
+    processed_note: str = ""        # 合计行的构成说明（混合计数时用，如“文档 4 份 + 图片 41 张”）
     error: str | None = None        # 出错原因（若无则为 None）
     course: str = ""                # 课程名称（取第一份报告）
     tag_dep: str = ""               # 系部专业（取第一份报告；无报告时用 CLI 参数）
@@ -88,6 +94,11 @@ class RunLogMixin:
         self._log_path: Path | None = None
         self._log_lock = threading.Lock()
         self._log_failed = False
+        # 阶段记录块是否处于“打开”状态：开始部分（标题/执行阶段/运行开始/配置）
+        # 已写入，出错信息与阶段结果随后追加到同一块内，由 _append_stage_log 闭合
+        self._stage_block_open = False
+        # 阶段开始时已写入日志的配置项（键→值）；阶段结果里不再重复输出同值字段
+        self._stage_config_values: dict[str, str] = {}
 
     def _resolve_log_path(self, template: str | Path,
                           reports_dir: str | Path | None = None,
@@ -171,12 +182,12 @@ class RunLogMixin:
 
 
     def _trim_log(self) -> None:
-        """日志超过配置大小时，按每条记录的“记录时间”清理过期记录。
+        """日志超过配置大小时，按每条记录的时间标记清理过期记录。
 
         只在启动阶段调用。大小与保留天数来自 config.yaml：
         ``paths.log_max_size_kb`` / ``paths.log_retention_days``；
-        任一为 0 时关闭清理。当前格式的每条记录都必须带“记录时间”，
-        没有该字段的旧格式记录会在清理时一并移除。
+        任一为 0 时关闭清理。时间标记优先取“记录时间”（出错条目），没有则取
+        “运行开始”（阶段记录）；两者都没有的旧格式记录会在清理时一并移除。
         清理采用同目录临时文件 + 原子替换。
         """
         if not self._log_path:
@@ -210,9 +221,9 @@ class RunLogMixin:
         kept_records: list[str] = []
         removed = 0
         for record in records:
-            match = _RECORD_TIME_RE.search(record)
+            match = _RECORD_TIME_RE.search(record) or _RUN_START_RE.search(record)
             if not match:
-                # 当前格式的每条记录都必须带“记录时间”；无时间视为旧格式并清理
+                # 当前格式的每条记录必须带“记录时间”或“运行开始”；两者都没有视为旧格式并清理
                 removed += 1
                 continue
             try:
@@ -274,23 +285,30 @@ class RunLogMixin:
     def _append_stage_start_entry(self, *, stage: str, course: str = "",
                                   tag_dep: str = "", report_name: str = "",
                                   config: dict[str, str] | None = None) -> None:
-        """阶段开始：先把配置信息写入运行日志（控制台同步输出一份）。"""
+        """阶段开始：写入该阶段记录块的开始部分（标题、执行阶段、运行开始与配置）。
+
+        记录块保持打开：处理过程中的出错信息与阶段结束的处理结果（结束时间、用时、
+        处理结果、状态）随后追加到同一块内，最后由 :meth:`_append_stage_log` 补上
+        闭合分隔线——一个阶段只有一条记录，标题/执行阶段/运行开始/配置只出现一次。
+        """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
             _SEP_EQ,
             format_stage_title(stage, course=course, tag_dep=tag_dep,
                                report_name=report_name),
             f"执行阶段: {stage}",
-            f"记录时间: {now}",
             f"运行开始: {now}",
         ]
+        # 只登记真正写入日志的配置项（空值不写行，阶段结果里也无需屏蔽）
+        self._stage_config_values = {
+            key: value for key, value in (config or {}).items() if value
+        }
         for key, value in (config or {}).items():
             if value:
                 lines.append(f"{key}: {value}")
-        lines.append("状态: 开始")
-        lines.append(_SEP_EQ)
         text = "\n".join(lines) + "\n"
         self._append_log(text)
+        self._stage_block_open = True
         logger.info("%s", "\n".join(lines))
 
     def _append_stage_event(self, *, stage: str, level: str, message: str) -> None:
@@ -309,35 +327,6 @@ class RunLogMixin:
         ]
         self._append_log("\n".join(lines) + "\n")
 
-    def _append_run_footer(self, *, start_dt: datetime, elapsed: float,
-                           error: str | None) -> None:
-        """追加本次运行尾；任一阶段有最终失败时不能显示为成功。"""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        failed_total = sum(entry.failed_count for entry in self.stage_logs)
-        has_warnings = any(entry.warnings for entry in self.stage_logs)
-        if error:
-            status = f"失败/中断 - {error}"
-        elif failed_total:
-            status = f"部分失败 - 共 {failed_total} 条失败"
-        elif has_warnings:
-            status = "成功（有警告）"
-        else:
-            status = "成功"
-        lines = [
-            _SEP_DASH,
-            f"记录时间: {now}",
-            f"运行结束: {now}",
-            f"总用时: {format_duration(elapsed)}",
-            f"状态: {status}",
-            _SEP_EQ,
-            "",
-        ]
-        self._append_log("\n".join(lines) + "\n")
-        # 运行结束时，log 记录的信息同样输出到控制台
-        logger.info("%s", "\n".join(lines))
-        if self._log_path and not self._log_failed:
-            logger.info("运行日志已追加: %s", self._log_path)
-
     def _build_stage_entry(self, *, stage: str, reports: list[ParsedReport],
                            tag_dep: str, start_dt: datetime, end_dt: datetime,
                            elapsed: float, error: str | None,
@@ -352,6 +341,7 @@ class RunLogMixin:
                            succeeded: int | None = None,
                            failed: int = 0,
                            unit: str = "份",
+                           processed_note: str = "",
                            list_warnings: bool = True) -> StageLogEntry:
         """构造阶段日志记录；标题取第一份报告的课程/系部专业/报告名。"""
         first = title_report or (reports[0] if reports else None)
@@ -376,6 +366,7 @@ class RunLogMixin:
             succeeded_count=ok,
             failed_count=failed,
             unit=unit,
+            processed_note=processed_note,
             error=error,
             course=first.course if first else "",
             tag_dep=(first.tag_dep if first else "") or tag_dep,
@@ -417,31 +408,43 @@ class RunLogMixin:
         ))
 
     def _append_stage_log(self, entry: StageLogEntry) -> None:
+        """追加阶段结束部分并闭合该阶段的记录块。
+
+        阶段开始块（标题 / 执行阶段 / 运行开始 / 配置）已写入时，这里只补结束时间、
+        处理结果与状态：一个阶段只有一条记录，标题等信息不重复输出。没有开始块时
+        （阶段开始前就失败、单项失败记录、测试直接调用）写一条完整独立记录。
+        """
         if not entry.record_time:
             entry.record_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.stage_logs.append(entry)
-        lines = [_SEP_EQ, entry.title]
-        lines.append(f"\u6267\u884c\u9636\u6bb5: {entry.stage}")
-        if entry.reports_dir:
-            lines.append(f"\u62a5\u544a\u76ee\u5f55: {entry.reports_dir}")
-        if entry.template:
-            lines.append(f"\u8bc4\u5206\u6a21\u677f: {entry.template}")
-        if entry.output:
-            lines.append(f"\u7ed3\u679c\u6587\u4ef6: {entry.output}")
-        if entry.start_student_id:
-            lines.append(f"\u5f00\u59cb\u5b66\u53f7: {entry.start_student_id}")
-        if entry.end_student_id:
-            lines.append(f"\u7ed3\u675f\u5b66\u53f7: {entry.end_student_id}")
-        lines.append(f"\u8fd0\u884c\u5f00\u59cb: {entry.start_time}")
+        lines: list[str] = []
+        if not self._stage_block_open:
+            lines = [_SEP_EQ, entry.title]
+            lines.append(f"执行阶段: {entry.stage}")
+            # 报告目录/评分模板/结果文件属于阶段开始的配置信息：开始已记录同值时不再重复
+            for key, value in (("\u62a5\u544a\u76ee\u5f55", entry.reports_dir),
+                               ("\u8bc4\u5206\u6a21\u677f", entry.template),
+                               ("\u7ed3\u679c\u6587\u4ef6", entry.output)):
+                if value and self._stage_config_values.get(key) != value:
+                    lines.append(f"{key}: {value}")
+            # 学号只在单项失败记录里保留（用于定位具体文档）；阶段记录不再重复
+            if entry.start_student_id:
+                lines.append(f"\u5f00\u59cb\u5b66\u53f7: {entry.start_student_id}")
+            if entry.end_student_id:
+                lines.append(f"\u7ed3\u675f\u5b66\u53f7: {entry.end_student_id}")
+            lines.append(f"\u8fd0\u884c\u5f00\u59cb: {entry.start_time}")
         lines.append(f"\u7ed3\u675f\u65f6\u95f4: {entry.end_time}")
         lines.append(f"\u7528\u65f6: {format_duration(entry.duration_seconds)}")
         if entry.processed_count:
             unit = entry.unit or "份"
-            lines.append(f"共处理: {entry.processed_count} {unit}")
+            # 混合计数（如 pic 的文档+图片）时写明构成，避免合计与分项对不上
+            note = f"（{entry.processed_note}）" if entry.processed_note else ""
+            lines.append(f"共处理: {entry.processed_count} {unit}{note}")
             lines.append(f"成功: {entry.succeeded_count} {unit}")
             lines.append(f"失败: {entry.failed_count} {unit}")
         for key, value in entry.extra.items():
-            if key == "\u7ed3\u679c\u6587\u4ef6":
+            # 阶段开始已记录且值相同的配置项（如并发、跳过图片、base_url）不重复输出
+            if self._stage_config_values.get(key) == value:
                 continue
             lines.append(f"{key}: {value}")
         if entry.warnings:
@@ -463,5 +466,8 @@ class RunLogMixin:
         lines.append(_SEP_EQ)
         text = "\n".join(lines) + "\n"
         self._append_log(text)
+        # 记录块已闭合：清空开始块登记的配置，后续记录（如单项失败）不再屏蔽同名字段
+        self._stage_block_open = False
+        self._stage_config_values = {}
         # 阶段完成时，log 记录的信息同样输出到控制台
         logger.info("%s", "\n".join(lines))

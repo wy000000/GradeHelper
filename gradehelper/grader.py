@@ -194,7 +194,7 @@ class Grader(RunLogMixin):
                     "报告目录": str(reports_dir),
                     "评分模板": str(template),
                     "结果文件": str(hint) if hint else "",
-                    "解析并发": f"{parse_workers} 线程",
+                    "并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
                 },
@@ -647,12 +647,15 @@ class Grader(RunLogMixin):
                 success = doc_success + img_success
                 failed = doc_failed_total + img_failed
                 unit = "条"
+                # 合计 = 文档 + 图片，共处理行写明构成，避免与分项数字对不上
+                processed_note = f"文档 {doc_total} 份 + 图片 {img_total} 张"
             else:
                 extra["识图"] = "跳过（无 LLM 评分项）"
                 total = doc_total
                 success = doc_success
                 failed = doc_failed_total
                 unit = "份"
+                processed_note = ""  # 只计文档，单位已是“份”，无需额外说明
             if load_failed:
                 extra["加载失败"] = f"{load_failed} 个文档"
             if saved_txt:
@@ -682,6 +685,7 @@ class Grader(RunLogMixin):
                 succeeded=success,
                 failed=failed,
                 unit=unit,
+                processed_note=processed_note,
                 # 中间错误已按时序写入日志，总结里只保留条数
                 list_warnings=False,
             ))
@@ -1108,9 +1112,9 @@ class Grader(RunLogMixin):
         self._log_path = self._resolve_log_path(template, reports_dir, tag_dep)
         self._log_failed = False
         self.stage_logs.clear()
-        run_start_dt = datetime.now()
-        run_t0 = time.perf_counter()
-        run_error: str | None = None
+        # 上次异常退出可能留下未闭合的阶段记录块，新一次运行重新开始
+        self._stage_block_open = False
+        self._stage_config_values = {}
         self._append_run_header(stage=stage, reports_dir=reports_dir,
                                 template=template, output=output)
 
@@ -1132,16 +1136,11 @@ class Grader(RunLogMixin):
                 return self.stage_sen(reports_dir, template, output, skip_images, tag_dep=tag_dep)
 
             raise ValueError(f"未知的 stage 参数: {stage}")
-        except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt
-            run_error = str(exc) or exc.__class__.__name__
-            raise
         finally:
-            # 全部阶段结束（成功、部分文件失败或中断）后统一写运行尾日志
-            self._append_run_footer(
-                start_dt=run_start_dt,
-                elapsed=time.perf_counter() - run_t0,
-                error=run_error,
-            )
+            # 运行开始/结束时间与状态已按阶段记录在各自的记录块里（含失败状态）；
+            # 这里只提示日志落盘位置，成功与中断都会输出
+            if self._log_path and not self._log_failed:
+                logger.info("运行日志已追加: %s", self._log_path)
 
     # -------------------------------------------------------- 报告读写（实现见 report_io.py）
 
