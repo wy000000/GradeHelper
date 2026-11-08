@@ -74,8 +74,8 @@ endpoints:
 
 paths:
   reports_dir: "D:/AI/Reports/"                        # 报告所在目录
-  template: "云安全-课程报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
-  # template: "云安全-docker实验报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
+  # template: "云安全-课程报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
+  template: "云安全-docker实验报告-评分模板.xlsx"        # rule 表来源（评分结果写入独立结果 xlsx，不写模板）
   output: ""                                      # 结果输出 xlsx；留空表示按 result_name_format 生成（与模板同目录）
   captions_dir: ""                                # 图片描述 txt 保存目录；留空表示与原报告同目录
   save_parsed: false                              # 是否把解析出的 md/图片落盘（默认仅驻留内存）
@@ -84,7 +84,7 @@ paths:
   # log_max_size_kb: 32                           # 日志超过该大小（KB）才清理旧记录；0 表示不清理
   # log_retention_days: 1                         # 日志记录保留天数；0 表示不清理
   parse_workers: 4                                # 单文件处理并发数（doc 解析/落盘、pic/sen 加载 md）
-  retry_rounds: 2                                 # 单文件失败后的额外重试轮数；0 表示不重试
+  retry_rounds: 1                                 # 单文件失败后的额外重试轮数；0 表示不重试
   # 报告文件命名格式：字段模板与分隔符（用于从文件名解析 课程-班级-学号-姓名-报告名）
   report_name_format: "{course}-{klass}-{student_id}-{stdName}-{reportName}"
   report_name_separator: "-"
