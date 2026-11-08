@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import select
 import socket
 import ssl
@@ -488,26 +489,69 @@ def parse_json_object(text: str) -> dict:
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
+        text = text.strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+
+    # 修复 LLM 常见的尾随逗号：{"a": 1,} -> {"a": 1}
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    if repaired != text:
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
+    # 花括号匹配回退：必须跳过字符串内部的 { }，否则 comment 里出现花括号会
+    # 导致深度计数错误，截出错误的子串或永远找不到闭合位置。
     start = text.find("{")
     if start >= 0:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
+        end = _find_json_end(text, start)
+        if end > start:
+            candidate = text[start:end]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+                if repaired != candidate:
                     try:
-                        return json.loads(text[start:i + 1])
+                        return json.loads(repaired)
                     except json.JSONDecodeError:
-                        break
+                        pass
     raise ValueError(
         f"无法从 LLM 输出中解析 JSON（长度={len(text)}）：\n"
         f"  前 200 字符: {text[:200]!r}\n"
         f"  后 200 字符: {text[-200:]!r}\n"
         "提示：若末尾明显被截断，请检查 finish_reason / max_tokens（思考模式可能耗尽生成预算）"
     )
+
+
+def _find_json_end(text: str, start: int) -> int:
+    """从 text[start]（必须是 '{'）出发，找到与之匹配的闭合 '}' 的后一位置。
+
+    扫描时跳过字符串内部的字符（包括其中的花括号），并处理转义引号 `\"`。
+    找不到匹配时返回 -1。
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
