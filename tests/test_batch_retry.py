@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,10 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.batch import run_file_batch  # noqa: E402
 from gradehelper.cancel import LLMAborted  # noqa: E402
-from gradehelper.config import AppConfig, EndpointConfig, PathsConfig  # noqa: E402
+from gradehelper.config import (  # noqa: E402
+    AppConfig, EndpointConfig, PathsConfig, PromptsConfig,
+)
 from gradehelper.excel_io import read_result_items, write_results  # noqa: E402
 from gradehelper.grader import Grader  # noqa: E402
-from gradehelper.models import ItemScore, ParsedReport, RuleItem  # noqa: E402
+from gradehelper.models import ItemScore, ParsedReport, ReportImage, RuleItem  # noqa: E402
 from gradehelper.parser import parse_all  # noqa: E402
 
 
@@ -107,6 +110,61 @@ class TestRunFileBatch(unittest.TestCase):
                 progress_enabled=False,
             )
 
+    def test_retry_workers_used_from_second_attempt(self):
+        """retry_workers 只在重试轮生效：首轮用 workers，重试轮用减半值。"""
+        created: list[int] = []
+
+        class RecordingPool(ThreadPoolExecutor):
+            def __init__(self, max_workers=None, **kwargs):
+                created.append(max_workers)
+                super().__init__(max_workers=max_workers, **kwargs)
+
+        attempts: dict[str, int] = {}
+
+        def worker(path: Path) -> str:
+            attempts[path.name] = attempts.get(path.name, 0) + 1
+            if path.name == "b.txt" and attempts[path.name] == 1:
+                raise OSError("暂时失败")
+            return f"ok:{path.name}"
+
+        with patch("gradehelper.batch.ThreadPoolExecutor", RecordingPool):
+            outcome = run_file_batch(
+                stage="sen", items=[Path("a.txt"), Path("b.txt")], worker=worker,
+                workers=4, retry_workers=2, path_of=lambda path: path,
+                label_of=lambda path: path.name, unit="份", max_attempts=2,
+                progress_enabled=False,
+            )
+
+        self.assertEqual(outcome.results, ["ok:a.txt", "ok:b.txt"])
+        self.assertEqual(len(outcome.failures), 0)
+        # 首轮 4 线程；重试轮 2 线程（配置值只减半一次）
+        self.assertEqual(created, [4, 2])
+
+    def test_without_retry_workers_retry_keeps_concurrency(self):
+        """不传 retry_workers 时重试轮并发与首轮一致（doc/加载等调用方行为不变）。"""
+        created: list[int] = []
+
+        class RecordingPool(ThreadPoolExecutor):
+            def __init__(self, max_workers=None, **kwargs):
+                created.append(max_workers)
+                super().__init__(max_workers=max_workers, **kwargs)
+
+        def worker(path: Path) -> str:
+            if path.name == "bad.txt":
+                raise OSError("始终失败")
+            return path.name
+
+        with patch("gradehelper.batch.ThreadPoolExecutor", RecordingPool), \
+                self.assertLogs("gradehelper.batch", level="ERROR"):
+            run_file_batch(
+                stage="doc", items=[Path("good.txt"), Path("bad.txt")],
+                worker=worker, workers=3, path_of=lambda path: path,
+                unit="份", max_attempts=2, progress_enabled=False,
+            )
+
+        # 不传 retry_workers：重试轮仍用首轮并发
+        self.assertEqual(created, [3, 3])
+
 
 class TestParseAllRetry(unittest.TestCase):
     def setUp(self):
@@ -124,7 +182,7 @@ class TestParseAllRetry(unittest.TestCase):
         def fake_parse(path, **_kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise RuntimeError("docling 暂时失败")
+                raise RuntimeError("mineru 暂时失败")
             from gradehelper.models import ParsedReport
             return ParsedReport(
                 course="云安全", klass="安全2401", student_id="2021001",
@@ -182,9 +240,9 @@ class TestSenRetry(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _grader(self, retry_rounds: int = 1) -> Grader:
+    def _grader(self, retry_rounds: int = 1, batch: int = 2) -> Grader:
         grader = Grader(AppConfig(
-            llm=EndpointConfig(batch_size=2),
+            llm=EndpointConfig(batch_size=batch),
             paths=PathsConfig(
                 report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
                 report_name_separator="-",
@@ -347,6 +405,115 @@ class TestSenRetry(unittest.TestCase):
         console = "\n".join(logs.output)
         self.assertIn("处理 3 份文档：成功 2 份，失败 1 份", console)
         self.assertIn("失败文档：2021002.md", console)
+
+    def test_retry_rounds_use_halved_llm_workers(self):
+        """进入 retry_rounds 后 llm 并发按配置值减半，且不逐轮递归减半。"""
+        pools: list[int] = []
+
+        class RecordingPool(ThreadPoolExecutor):
+            def __init__(self, max_workers=None, **kwargs):
+                pools.append(max_workers)
+                super().__init__(max_workers=max_workers, **kwargs)
+
+        calls: dict[str, int] = {}
+
+        def fake_grade(_client, report, _llm_rules):
+            calls[report.student_id] = calls.get(report.student_id, 0) + 1
+            if report.student_id == "2021002" and calls[report.student_id] <= 2:
+                raise RuntimeError("临时失败")
+            return {"event": ItemScore(key="event", score=12.0, confidence=0.9,
+                                       comment="LLM 评语")}
+
+        grader = self._grader(retry_rounds=2, batch=4)  # 共 3 次尝试
+        grader._grade_with_llm_batch = fake_grade
+        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
+                patch("gradehelper.batch.ThreadPoolExecutor", RecordingPool):
+            grader.stage_sen(self.tmp, self.template, output=self.result_path,
+                             skip_images=0)
+
+        # 首轮用配置值 4；两次重试轮都用减半值 2（不逐轮再减为 1）
+        self.assertEqual(pools, [4, 2, 2])
+        # 配置本身不被就地修改
+        self.assertEqual(grader.config.llm.batch_size, 4)
+        self.assertEqual(calls["2021002"], 3)
+
+
+class TestPicRetryHalvesBatch(unittest.TestCase):
+    """pic 进入 retry_rounds 后 vllm batch_size 按配置值减半（不逐轮递归减半）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.template = self.tmp / "template.xlsx"
+        self.template.write_bytes(b"")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _rules():
+        return [
+            RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+                     evaluation="", comment="规则评语"),
+            RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
+                     evaluation="事件描述", comment=""),
+        ]
+
+    def _report(self) -> ParsedReport:
+        base = "云安全-安全2401-2021001-张三-课程报告"
+        md_path = self.tmp / f"{base}.md"
+        md_text = f"正文\n[[PIC:{base}-P3.png]]\n"
+        md_path.write_text(md_text, encoding="utf-8")
+        return ParsedReport(
+            course="云安全", klass="安全2401", student_id="2021001",
+            std_name="张三", report_name="课程报告",
+            source_path=str(md_path), md_text=md_text,
+            images=[ReportImage(index=3, ext="png", data=b"\x89PNG")],
+        )
+
+    def _grader(self, batch: int, retry_rounds: int) -> Grader:
+        return Grader(AppConfig(
+            vllm=EndpointConfig(batch_size=batch),
+            paths=PathsConfig(
+                report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
+                report_name_separator="-",
+                result_name_format="{course}-{tagDep}-{reportName}-评分结果.xlsx",
+                parse_workers=2, retry_rounds=retry_rounds,
+            ),
+            prompts=PromptsConfig(image_context="[图片描述 P{n}: {caption}]"),
+        ))
+
+    def test_retry_uses_halved_batch_size_not_recursive(self):
+        """首轮用配置值；进入重试后减半一次，后续重试轮沿用同一值。"""
+        report = self._report()
+        seen: list[int] = []
+
+        def fake_caption_images(_reports, cfg, _prompt, *, cancel=None,
+                                on_error=None, on_batch=None):
+            seen.append(cfg.batch_size)
+            if len(seen) <= 2:  # 首轮与第 1 次重试都失败，触发下一轮重试
+                if on_error is not None:
+                    on_error(_reports[0], _reports[0].images[0],
+                             RuntimeError("临时失败"))
+                return 0
+            for item in _reports:
+                for image in item.images:
+                    image.caption = f"图{image.index}描述"
+            if on_batch is not None:
+                on_batch([(item, image) for item in _reports
+                          for image in item.images])
+            return sum(len(item.images) for item in _reports)
+
+        grader = self._grader(batch=4, retry_rounds=2)  # 共 3 轮
+        grader._load_reports_for_pic = lambda *args, **kwargs: [report]
+        with patch("gradehelper.grader.caption_images", fake_caption_images), \
+                patch("gradehelper.grader.read_rules", return_value=self._rules()):
+            grader.stage_pic(self.tmp, self.template)
+
+        # 首轮 4；两次重试轮都用 2（按配置值只减半一次，不逐轮再减为 1）
+        self.assertEqual(seen, [4, 2, 2])
+        # 配置本身不被就地修改
+        self.assertEqual(grader.config.vllm.batch_size, 4)
 
 
 if __name__ == "__main__":

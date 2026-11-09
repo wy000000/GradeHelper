@@ -50,11 +50,12 @@ def resolve_result_path_hint(config: AppConfig, template: str | Path,
                              reports_dir: str | Path | None,
                              output: str | Path | None = None,
                              tag_dep: str = "系部专业") -> Path | None:
-    """阶段开始前估算结果文件路径（不解析 docx/md 正文）。
+    """阶段开始前估算结果文件路径（不解析文档正文）。
 
     与 resolve_result_path 使用同一命名规则，仅依据文件名推断课程与报告名：
     - 显式 output（--output / paths.output）优先；
-    - 否则扫描报告目录，取第一份符合命名格式的 docx（没有则退化为 .md）；
+    - 否则扫描报告目录，取第一份符合命名格式的文档（后缀见 paths.document_suffixes，
+      没有则退化为 .md）；
     - 无法推断（无报告、目录不存在或未配置 result_name_format）时返回 None。
     """
     output = output or (config.paths.output or "").strip() or None
@@ -68,11 +69,12 @@ def resolve_result_path_hint(config: AppConfig, template: str | Path,
     separator = config.paths.report_name_separator
     candidates: list[Path] = []
     try:
-        candidates = scan_reports(root, name_format=name_format, separator=separator)
+        candidates = scan_reports(root, name_format=name_format, separator=separator,
+                                  suffixes=tuple(config.paths.document_suffixes))
     except OSError:
         candidates = []
     if not candidates:
-        # 只跑了 pic/sen 时目录里可能只剩 md（docx 已被移走）
+        # 只跑了 pic/sen 时目录里可能只剩 md（原文档已被移走）
         try:
             candidates = sorted(root.glob("*.md"))
         except OSError:

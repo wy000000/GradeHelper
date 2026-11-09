@@ -28,7 +28,7 @@ else:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gradehelper",
-        description="课程报告自动化评分系统（docling 解析 + 规则引擎 + LLM 评估）",
+        description="课程报告自动化评分系统（MinerU 解析 + 规则引擎 + LLM 评估）",
     )
     stage = "doc"
     stage = "pic"

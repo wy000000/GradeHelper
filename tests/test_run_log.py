@@ -283,6 +283,79 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertLess(text.index("-doc"), text.index("-pic"))
         self.assertLess(text.index("-pic"), text.index("-sen"))
         self.assertEqual(text.count("GradeHelper \u8fd0\u884c\u65e5\u5fd7"), 1)
+    def _install_fake_stages(self, calls: list[str], *, doc_failed: int = 0,
+                             pic_failed: int = 0,
+                             warnings: list[str] | None = None) -> None:
+        """替换三个阶段为假实现：按参数在阶段记录里放入最终失败数与警告。"""
+
+        def _finish(stage: str, sid: str, failed: int) -> None:
+            entry = self.grader._build_stage_entry(
+                stage=stage, reports=[_report(student_id=sid)], tag_dep="计算机系",
+                start_dt=self.start, end_dt=self.end, elapsed=60.0, error=None,
+                warnings=list(warnings or []),
+                processed=1, succeeded=0 if failed else 1, failed=failed,
+            )
+            self.grader._append_stage_log(entry)
+
+        def fake_doc(*args, **kwargs):
+            calls.append("doc")
+            _finish("doc", "2021001", doc_failed)
+            return self.tmp / "result.xlsx"
+
+        def fake_pic(*args, **kwargs):
+            calls.append("pic")
+            _finish("pic", "2021002", pic_failed)
+
+        def fake_sen(*args, **kwargs):
+            calls.append("sen")
+            _finish("sen", "2021003", 0)
+            return self.tmp / "result.xlsx"
+
+        self.grader.stage_doc = fake_doc  # type: ignore[method-assign]
+        self.grader.stage_pic = fake_pic  # type: ignore[method-assign]
+        self.grader.stage_sen = fake_sen  # type: ignore[method-assign]
+
+    def _run_full(self) -> None:
+        self.grader.run(reports_dir=str(self.tmp / "reports"),
+                        template=str(self.tmp / "模板.xlsx"), stage="full")
+
+    def test_full_stops_after_doc_stage_failure(self):
+        """doc 阶段出错：完成 doc 后不再执行 pic / sen，跳过原因写入运行日志。"""
+        calls: list[str] = []
+        self._install_fake_stages(calls, doc_failed=2)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_full()
+
+        self.assertEqual(calls, ["doc"])
+        message = str(ctx.exception)
+        self.assertIn("阶段 doc 存在错误", message)
+        self.assertIn("pic、sen 未运行", message)
+        self.assertIn("不再执行后续阶段", self._read())
+
+    def test_full_stops_after_pic_stage_failure(self):
+        """pic 阶段出错：doc、pic 都完成，但不再执行 sen。"""
+        calls: list[str] = []
+        self._install_fake_stages(calls, pic_failed=1)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_full()
+
+        self.assertEqual(calls, ["doc", "pic"])
+        message = str(ctx.exception)
+        self.assertIn("阶段 pic 存在错误", message)
+        self.assertIn("sen 未运行", message)
+        self.assertIn("不再执行后续阶段", self._read())
+
+    def test_full_continues_when_stage_only_has_warnings(self):
+        """阶段只有中间警告（状态成功）时，阶段之间照常继续。"""
+        calls: list[str] = []
+        self._install_fake_stages(calls, warnings=["某文档: 图片缺失"])
+
+        self._run_full()
+
+        self.assertEqual(calls, ["doc", "pic", "sen"])
+
     def test_item_failure_title_uses_specific_document(self):
         self.grader._append_failure_entry(
             stage="pic", error="timeout", report=_report(student_id="2021009"),

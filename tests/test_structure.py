@@ -37,13 +37,25 @@ class TestFilename(unittest.TestCase):
         self.assertEqual(parse_filename(Path("云安全-安全2401-2024001-张三-期中报告.docx")),
                          ("云安全", "安全2401", "2024001", "张三", "期中报告"))
 
+    def test_default_suffixes_include_doc_and_pdf(self):
+        for suffix in (".docx", ".doc", ".pdf"):
+            self.assertEqual(
+                parse_filename(Path(f"云安全-安全2401-2024001-张三-期中报告{suffix}")),
+                ("云安全", "安全2401", "2024001", "张三", "期中报告"),
+                msg=suffix)
+
+    def test_custom_suffixes(self):
+        path = Path("云安全-安全2401-2024001-张三-期中报告.pdf")
+        self.assertIsNone(parse_filename(path, suffixes=(".docx",)))
+        self.assertIsNotNone(parse_filename(path, suffixes=(".pdf",)))
+
     def test_course_with_dash(self):
         self.assertEqual(parse_filename(Path("云原生-安全-安全2401-2024001-张三-期中报告.docx")),
                          ("云原生-安全", "安全2401", "2024001", "张三", "期中报告"))
 
     def test_invalid(self):
         self.assertIsNone(parse_filename(Path("report.docx")))
-        self.assertIsNone(parse_filename(Path("云安全-安全2401-2024001-张三.pdf")))
+        self.assertIsNone(parse_filename(Path("云安全-安全2401-2024001-张三-期中报告.txt")))
         self.assertIsNone(parse_filename(Path("~$云安全-安全2401-2024001-张三.docx")))
 
 
@@ -53,12 +65,28 @@ class TestScanReports(unittest.TestCase):
             root = Path(tmp)
             top = root / "云安全-安全2401-2024001-张三-期中报告.docx"
             top.write_bytes(b"docx")
+            pdf = root / "云安全-安全2401-2024001-张三-期中报告.pdf"
+            pdf.write_bytes(b"pdf")
+            legacy = root / "云安全-安全2401-2024001-张三-期中报告.doc"
+            legacy.write_bytes(b"doc")
+            ignored = root / "云安全-安全2401-2024001-张三-期中报告.txt"
+            ignored.write_bytes(b"txt")
             nested_dir = root / "sub"
             nested_dir.mkdir()
             nested = nested_dir / "云安全-安全2401-2024002-李四-期中报告.docx"
             nested.write_bytes(b"docx")
 
-            self.assertEqual(scan_reports(root), [top])
+            self.assertEqual(scan_reports(root), [legacy, top, pdf])
+
+    def test_custom_suffixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pdf = root / "云安全-安全2401-2024001-张三-期中报告.pdf"
+            pdf.write_bytes(b"pdf")
+            docx = root / "云安全-安全2401-2024001-张三-期中报告.docx"
+            docx.write_bytes(b"docx")
+
+            self.assertEqual(scan_reports(root, suffixes=(".pdf",)), [pdf])
 
 
 class TestStructureRules(unittest.TestCase):

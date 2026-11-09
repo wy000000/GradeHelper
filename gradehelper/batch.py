@@ -8,6 +8,9 @@
 - 每次失败且还会重试时通过 ``on_retry`` 回调记录中间错误；
 - 重试结束仍有失败时只记录日志并返回，不影响已经成功的文件。
 
+以上只保证**阶段内**的容错；**阶段之间**是否继续由 ``grader.run`` 决定：
+当前阶段完成后若仍有最终失败（或阶段中断），不再执行下一阶段。
+
 ``KeyboardInterrupt`` / ``LLMAborted`` 等中止信号不会入队，而是立即向上传播。
 """
 
@@ -108,6 +111,7 @@ def run_file_batch(
     max_attempts: int = 2,
     progress_enabled: bool = True,
     progress_stage: str | None = None,
+    retry_workers: int | None = None,
 ) -> BatchOutcome[R]:
     """多线程处理文件，失败入队并在整批结束后自动重试。
 
@@ -125,6 +129,9 @@ def run_file_batch(
     - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮；
     - ``progress_stage``：进度条显示的阶段名；默认与 ``stage`` 相同。
       加载 md、LLM 评分等同一阶段内的多个批处理可借此区分，避免进度提示混淆。
+    - ``retry_workers``：重试轮（第 2 次及以后尝试）的并发线程数；``None`` 表示
+      与首轮相同。``pic`` / ``sen`` 进入 ``retry_rounds`` 时传入 ``batch_size``
+      减半后的值：配置值只减半一次，后续重试轮沿用同一值，不再递归减半（下限 1）。
 
     返回成功结果（保持输入顺序）与最终异常队列。
     """
@@ -147,14 +154,19 @@ def run_file_batch(
         round_stage = progress_label if attempt == 1 else f"{progress_label}重试"
         # 重试轮中 pending 全是上一轮失败的文档：失败数先按 pending 计入，
         # 同一文档再次失败不重复累计，重试成功后失败数减一。
+        # 首轮用 workers；重试轮可用更小的 retry_workers（pic/sen 进入
+        # retry_rounds 时传入 batch_size 减半后的值，只减一次、不逐轮再减）
+        round_workers = (max(1, int(workers))
+                         if attempt == 1 or retry_workers is None
+                         else max(1, int(retry_workers)))
         progress = ParallelProgress(
             round_stage, len(pending), unit=unit,
-            workers=max(1, int(workers)), enabled=progress_enabled,
+            workers=round_workers, enabled=progress_enabled,
             retry_mode=attempt > 1,
             initial_failed=len(pending) if attempt > 1 else 0,
         )
         with progress:
-            pool = ThreadPoolExecutor(max_workers=max(1, int(workers)))
+            pool = ThreadPoolExecutor(max_workers=round_workers)
             try:
                 futures = {}
                 for _index, item in pending:
@@ -208,9 +220,12 @@ def run_file_batch(
         if not failures or attempt >= total_attempts:
             break
 
+        next_workers = (max(1, int(workers)) if retry_workers is None
+                        else max(1, int(retry_workers)))
         logger.warning(
-            "【阶段 %s】本轮有 %d 个文件失败，开始第 %d/%d 轮重试（只重试异常队列）",
-            stage, len(failures), attempt + 1, total_attempts,
+            "【阶段 %s】本轮有 %d 个文件失败，开始第 %d/%d 轮重试"
+            "（只重试异常队列，并发 %d）",
+            stage, len(failures), attempt + 1, total_attempts, next_workers,
         )
         retry_items: list[tuple[int, T]] = []
         for failed in failures.values():

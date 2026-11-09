@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,34 @@ from typing import Any
 import yaml
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+MINERU_TIER_CHOICES = {"flash", "basic", "standard", "advanced"}
+# 默认处理的文档后缀（可在 config.yaml 的 paths.document_suffixes 中覆盖）
+DEFAULT_DOCUMENT_SUFFIXES = (".docx", ".doc", ".pdf")
+
+
+def _normalize_document_suffixes(value: Any) -> list[str]:
+    """把 YAML 中的后缀配置规范化为小写、带前导点的列表。
+
+    兼容 ``[".docx", ".pdf"]``、``"docx, doc, pdf"`` 与 ``"docx"`` 三种写法；
+    去重并保持顺序。空值或全部非法时回退到默认 .docx/.doc/.pdf。
+    """
+    if isinstance(value, str):
+        items = re.split(r"[,;\s]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        items = []
+    suffixes: list[str] = []
+    for item in items:
+        suffix = item.strip().lower()
+        if not suffix:
+            continue
+        if not suffix.startswith("."):
+            suffix = "." + suffix
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+    return suffixes or list(DEFAULT_DOCUMENT_SUFFIXES)
+
 
 
 
@@ -24,7 +53,7 @@ class EndpointConfig:
     connect_timeout: int = 0      # TCP/TLS 连接超时（秒）
     read_timeout: int = 0         # 等待响应数据的超时（秒）
     max_retries: int = 0
-    batch_size: int = 0
+    batch_size: int = 0   # 并发数；pic/sen 进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）
 
     # ---- API 参数（来自 YAML 的 api 子区域，全部透传给 /chat/completions）----
     # api 子区域中出现的所有键值对原样存入此字典；新增任意键自动生效，无需改代码
@@ -74,11 +103,20 @@ class PathsConfig:
     parse_workers: int = 4
     # 单文件失败后的额外重试轮数；0 表示不重试
     retry_rounds: int = 1
+    # 需要处理的报告文档后缀（默认 .docx / .doc / .pdf；可写成 YAML 列表或逗号分隔字符串）
+    document_suffixes: list[str] = field(default_factory=lambda: list(DEFAULT_DOCUMENT_SUFFIXES))
+    # MinerU 解析档位（仅 PDF/图片生效；办公文档固定使用 MinerU 的 flash 原生解析）
+    mineru_tier: str = "standard"
     # 报告文件命名格式（用于解析文件名提取课程/班级/学号/姓名/报告名）
     report_name_format: str = ""
     report_name_separator: str = ""
     # 结果文件命名模式（与模板同目录；占位符 {course}/{tagDep}/{reportName}）
     result_name_format: str = ""
+
+    def __post_init__(self) -> None:
+        self.document_suffixes = _normalize_document_suffixes(self.document_suffixes)
+        tier = str(self.mineru_tier or "").strip().lower()
+        self.mineru_tier = tier if tier in MINERU_TIER_CHOICES else "standard"
 
 
 @dataclass

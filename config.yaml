@@ -27,7 +27,7 @@ endpoints:
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # LLM 端点的失败重试次数配置。
-      batch_size: 4        # sen 阶段并发提交的报告数
+      batch_size: 4        # sen 阶段并发提交的报告数（进入 retry_rounds 重试轮后减半，最小 1）
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
@@ -60,7 +60,7 @@ endpoints:
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # VLLM 端点的失败重试次数配置。
-      batch_size: 4        # 并发识别图片数
+      batch_size: 4        # 并发识别图片数（进入 retry_rounds 重试轮后减半，最小 1）
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
@@ -85,6 +85,16 @@ paths:
   # log_retention_days: 1                         # 日志记录保留天数；0 表示不清理
   parse_workers: 4                                # 单文件处理并发数（doc 解析/落盘、pic/sen 加载 md）
   retry_rounds: 1                                 # 单文件失败后的额外重试轮数；0 表示不重试
+  # 需要处理的文档后缀（doc 阶段只扫描这些后缀；MinerU 支持 doc/docx/pdf 等：
+  # PDF、扫描版 PDF、DOC、DOCX，以及 PPT/PPTX、XLS/XLSX、RTF、ODT、EPUB、HTML、
+  # PNG/JPG/JPEG/WEBP/GIF/BMP/TIFF/JP2 图片等。
+  # 本系统默认只在报告目录中处理 docx/doc/pdf；按需增删下面的列表即可，
+  # 也可写成逗号分隔字符串：document_suffixes: "docx, doc, pdf"
+  # 注意：所有格式均无本地兜底解析器，MinerU 解析失败即记为失败文档（会进入重试队列）。
+  document_suffixes: [".docx", ".doc", ".pdf"]
+  # MinerU 解析档位（仅 PDF/图片生效；办公文档由 MinerU 以 flash 原生解析）：
+  # flash=最快（模型需求最低）、basic=基础、standard=标准（默认，首次使用需下载模型）、advanced=高级
+  mineru_tier: "standard"
   # 报告文件命名格式：字段模板与分隔符（用于从文件名解析 课程-班级-学号-姓名-报告名）
   report_name_format: "{course}-{klass}-{student_id}-{stdName}-{reportName}"
   report_name_separator: "-"

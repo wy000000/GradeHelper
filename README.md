@@ -12,13 +12,29 @@ ver 0.1.0。当前版本支持课程报告自动评分。
 
 ## 流程
 
-对课程报告（docx）自动评分：docling 解析 → 程序化规则批处理 → vllm 图片识别 → LLM 评分项逐项评估 → 结果写入与模板同目录的独立结果 xlsx 的 `result` 表。
+对课程报告（docx / doc / pdf）自动评分：MinerU 解析 → 程序化规则批处理 → vllm 图片识别 → LLM 评分项逐项评估 → 结果写入与模板同目录的独立结果 xlsx 的 `result` 表。
+
+## 支持的文档类型
+
+`doc` 阶段使用 [MinerU](https://github.com/opendatalab/MinerU)（4.x）解析报告，实际扫描的后缀由 `config.yaml` 的 `paths.document_suffixes` 决定，默认：
+
+| 后缀 | 说明 | 解析方式 |
+| --- | --- | --- |
+| `.docx` | Word 文档（默认评分对象） | MinerU |
+| `.doc` | 旧版 Word 文档 | MinerU |
+| `.pdf` | PDF（含扫描版，支持 OCR） | MinerU |
+
+所有格式均由 MinerU 统一解析，**不设本地兜底解析器**：某份文档解析失败时会进入异常队列重试（`paths.retry_rounds`），重试后仍失败则记录到运行日志并跳过，最终计入该阶段的失败数。
+
+MinerU 本身还支持 PPT/PPTX、XLS/XLSX、RTF、ODT/ODS/ODP、EPUB、OFD、HTML/MHTML、CSV/TSV 以及 PNG/JPG/JPEG/WEBP/GIF/BMP/TIFF/JP2 图片；如有需要，把对应后缀加入 `paths.document_suffixes` 即可让 `doc` 阶段一并处理。**图片识别（`pic`）与 LLM 评分（`sen`）阶段只处理 `doc` 阶段落盘的 `.md` 与图片**，与原始文档格式无关。`doc` 阶段只扫描报告目录**顶层**、且文件名符合 `paths.report_name_format` 的文档，不搜索子目录。
+
+> 安装 MinerU 需要 Python 3.11–3.14；PDF 的 `standard`/`advanced` 档位首次使用会自动下载模型。若只想快速跑通，可把 `paths.mineru_tier` 改为 `flash`。
 
 ## 安装
 
 ```powershell
 pip install -e .
-# 或直接安装依赖：pip install python-docx openpyxl PyYAML requests docling
+# 或直接安装依赖：pip install openpyxl PyYAML requests "mineru>=4.0,<5"
 ```
 
 ## 运行方式
@@ -65,7 +81,7 @@ python -m gradehelper --version   # 查看版本号
 
 | 参数 | 说明 |
 | --- | --- |
-| `--reports DIR` | 报告目录，覆盖 `paths.reports_dir`。`doc` 阶段只扫描该目录**顶层**符合命名格式的 `.docx`（不搜索子目录）；`pic` / `sen` 阶段不重新解析 docx，只扫描该目录**顶层**的 `*.md` |
+| `--reports DIR` | 报告目录，覆盖 `paths.reports_dir`。`doc` 阶段只扫描该目录**顶层**符合命名格式、且后缀在 `paths.document_suffixes` 中的文档（默认 `.docx`/`.doc`/`.pdf`，不搜索子目录）；`pic` / `sen` 阶段不重新解析原文档，只扫描该目录**顶层**的 `*.md` |
 | `--template XLSX` | 评分模板，覆盖 `paths.template`。只读取模板中的 `rule` 表（评分项、权重、处理方法、评分标准），**结果不写入模板** |
 | `--output XLSX` | 结果 xlsx，覆盖 `paths.output`。相对路径以当前工作目录为准；留空时按 `paths.result_name_format` 生成（与模板同目录） |
 | `--tagDep NAME` | 系部专业标识，用于结果文件名与日志文件名中的 `{tagDep}` 占位符（默认 `系部专业`） |
@@ -83,13 +99,13 @@ python -m gradehelper --version   # 查看版本号
 
 | 阶段 | 依赖 | 主要动作 | 产物 |
 | --- | --- | --- | --- |
-| `doc` | 报告 docx + 模板 | docling 解析（失败回退 python-docx）→ 应用 `--skip-images` → 读取 `rule` 表 → 程序化规则打分 | md + 图片落盘；结果 xlsx（LLM 项预置 0） |
+| `doc` | 报告文档（docx/doc/pdf）+ 模板 | MinerU 解析 → 应用 `--skip-images` → 读取 `rule` 表 → 程序化规则打分 | md + 图片落盘；结果 xlsx（LLM 项预置 0） |
 | `pic` | `doc` 产出的 md/图片 + 模板 | vllm 并发识别图片 → 描述嵌入 md | md 覆盖落盘；`报告名-Pn.txt` 描述文件（均按批实时回写） |
 | `sen` | `pic` 产出的 md + 模板 + 结果 xlsx | 结果文件前置校验（表头 + 学号）→ llm 批量评估所有 LLM 评分项 | 更新结果 xlsx（分数 + 置信度，按批实时回写） |
-| `full` | 同上 | 依次执行 `doc` → `pic` → `sen` | 同三个阶段 |
+| `full` | 同上 | 依次执行 `doc` → `pic` → `sen`；当前阶段结束后若该阶段仍有错误，完成本阶段后停止，不再执行后续阶段（退出码 1） | 同三个阶段 |
 
 - `pic` 仅在 `rule` 表存在 LLM 评分项时才识别图片；没有 LLM 项时跳过识图。
-- 三个阶段都按文件多线程处理（`paths.parse_workers`）：单份文档的解析、加载或保存失败只会进入异常队列，不会中断其它文档；整批处理完成后自动重试异常队列（`paths.retry_rounds`，默认再重试 1 轮），重试后仍失败的文件记录到运行日志并跳过。重试过程中的**中间错误**（如某次解析/加载/识图/评分失败、docling 回退、图片缺失等）会逐条记录、每轮各记一条，不省略、不用最新一条覆盖旧记录：三个阶段都在处理过程中**按时序逐条写入日志**（每条带记录时间与级别），阶段总结里只保留 `中间错误: N 条` 计数。
+- 三个阶段都按文件多线程处理（`paths.parse_workers`）：单份文档的解析、加载或保存失败只会进入异常队列，不会中断其它文档；整批处理完成后自动重试异常队列（`paths.retry_rounds`，默认再重试 1 轮），重试后仍失败的文件记录到运行日志并跳过。其中 `pic` / `sen` 进入重试轮后，vllm/llm 的并发（`batch_size`）按配置值减半——只在进入重试时减一次，后续重试轮沿用该值，不逐轮递归减半（下限 1 线程）。重试过程中的**中间错误**（如某次解析/加载/识图/评分失败、MinerU 解析失败、图片缺失等）会逐条记录、每轮各记一条，不省略、不用最新一条覆盖旧记录：三个阶段都在处理过程中**按时序逐条写入日志**（每条带记录时间与级别），阶段总结里只保留 `中间错误: N 条` 计数。以上均为**阶段内**的容错。`full` 模式下**阶段之间**还会把关：当前阶段结束后若该阶段仍有最终失败（或中断），完成本阶段后不再执行下一阶段——已完成的产物保留，跳过原因写入控制台与运行日志，并以退出码 1 结束；修复后重跑，或用 `--stage` 单独执行后续阶段续跑。
 - `sen` 阶段的失败以**文档全名**登记（md 文件名，如 `云安全-安全2401-2021001-张三-课程报告.md`）：处理过程中按时序写入的出错/报警信息保留文档名与出错原因，阶段总结的标题、`失败文档` 列表与控制台汇总都用全名；不再为每个失败文档在中途单独写一条失败记录。失败按文档全名去重：同一文档多轮重试失败只计一次；重试成功后从失败数中移除，并在阶段日志中记为 `重试成功: N 份（…md）`。LLM 返回的 JSON 被截断/无法解析、缺少评分项、某项不是对象、`score` 缺失或不是数字时，该文档一律计为**处理失败**（不写分数、不做“取最低分”兜底），进入异常队列重试。
 - 三个阶段的运行日志**每个阶段一条记录**（按时间顺序写在同一个记录块里）：开始的**配置信息**（标题、执行阶段、运行开始、报告目录、评分模板、结果文件、并发、重试轮数、跳过图片等；`pic` / `sen` 还含各自 vllm/llm 的 base_url 与 model）→ 处理过程中的**出错/报警信息**（每条带记录时间与级别，保留文档名与出错内容）→ 阶段结束的**处理结果**（结束时间、用时、处理/成功/失败、中间错误条数、最终未成功文档名、状态）。`pic` 阶段的合计是文档与图片之和（如 `共处理: 45 条（文档 4 份 + 图片 41 张）`），`共处理` 行会写明构成，分项见 `文档:` / `图片:` 行。标题、执行阶段、运行开始与配置信息在同一阶段只出现一次，不重复记录；不再写 `记录时间`（与 `运行开始` 同值）、`状态: 开始`，也不再单独追加运行尾记录（状态与用时由阶段记录本身给出），因此一次运行里同一项信息只出现一遍。不再为每个失败文档在中途单独写一条失败记录；控制台同样显示处理过程信息，最后输出与日志相同的结束部分。
 - `sen` 阶段结束（包括中途失败/中断）都会在控制台输出一行汇总：`【阶段 sen】处理 N 份文档：成功 X 份，失败 Y 份；失败文档：<全名、全名>`，失败文档缺省时不显示该段。
@@ -141,7 +157,7 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 
 ## 运行产物
 
-- 报告 md：`课程名称-专业班级-学号-姓名-报告名.md`（与原 docx 同目录，doc 阶段已去除空行）
+- 报告 md：`课程名称-专业班级-学号-姓名-报告名.md`（与原文档同目录，doc 阶段已去除空行）
 - 报告图片：`课程名称-专业班级-学号-姓名-报告名-Pn.ext`（与 md 同目录，保留原始编号）
 - 图片描述：`...-Pn.txt`（`paths.captions_dir` 为空时与原报告同目录）
 - 结果 xlsx：`result` 表；总分列为 Excel 加权公式 `=分项1*权重1+分项2*权重2+...`；`置信度` 列仅 LLM 项写入
@@ -176,7 +192,7 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 | `connect_timeout` | `10` | TCP/TLS 连接超时（秒） |
 | `read_timeout` | `300` | 流式读取时两个数据块之间的最大静默时间（秒） |
 | `max_retries` | `3` | 请求失败重试次数 |
-| `batch_size` | `4` | `llm` 为 `sen` 阶段并发报告数；`vllm` 为并发识图数 |
+| `batch_size` | `4` | `llm` 为 `sen` 阶段并发报告数；`vllm` 为并发识图数。进入 `retry_rounds` 重试轮后并发按此值减半（只减一次，不逐轮递归减半，最小 1） |
 
 `api`（原样透传给 `/chat/completions`，新增任意键自动生效）：`temperature`、`top_p`、`top_k`、`min_p`、`presence_penalty`、`frequency_penalty`、`repeat_penalty`、`seed`、`reasoning`、`max_tokens`（默认注释掉，即不限制）。
 
@@ -194,7 +210,9 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 | `log_max_size_kb` | `32` | 日志超过该大小（KB）才清理旧记录；`0` 表示不清理 |
 | `log_retention_days` | `1` | 日志记录保留天数；`0` 表示不清理 |
 | `parse_workers` | `4` | 单文件处理并发数（`doc` 解析/落盘，`pic`/`sen` 加载 md） |
-| `retry_rounds` | `1` | 单文件失败后的额外重试轮数；`0` 表示不重试 |
+| `retry_rounds` | `1` | 单文件失败后的额外重试轮数；`0` 表示不重试；`pic`/`sen` 进入重试轮后并发按 `batch_size` 减半 |
+| `document_suffixes` | `[".docx", ".doc", ".pdf"]` | `doc` 阶段扫描并解析的文档后缀；支持 YAML 列表或逗号分隔字符串。可加入 MinerU 支持的其它后缀（如 `.pptx`、`.xlsx`、`.png`） |
+| `mineru_tier` | `standard` | MinerU 解析档位（仅 PDF/图片生效）：`flash` / `basic` / `standard` / `advanced`；办公文档固定用 MinerU 的 `flash` 原生解析 |
 | `report_name_format` | `{course}-{klass}-{student_id}-{stdName}-{reportName}` | 报告文件名解析格式，必须配置，否则所有报告都会被忽略 |
 | `report_name_separator` | `-` | 报告文件名分隔符 |
 | `result_name_format` | `{course}-{tagDep}-{reportName}-评分结果.xlsx` | 结果文件命名模式（与模板同目录，`评分结果` 为固定字符串） |

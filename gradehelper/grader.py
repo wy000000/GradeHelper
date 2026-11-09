@@ -1,4 +1,8 @@
-"""总编排：doc(解析+程序规则) → pic(vllm识图) → sen(llm语义评分)，可独立执行。"""
+"""总编排：doc(解析+程序规则) → pic(vllm识图) → sen(llm语义评分)，可独立执行。
+
+阶段内：单文件出错只记录并继续完成本阶段（由 batch 与各阶段自行容错）；
+阶段间（full 模式）：当前阶段结束后若仍有错误，不再执行下一阶段。
+"""
 
 from __future__ import annotations
 
@@ -79,18 +83,27 @@ class Grader(RunLogMixin):
         ensure_result_writable(result_path)
 
     def _first_report_identity(self, reports_dir: str | Path,
-                               suffix: str) -> tuple[str, str]:
+                               suffixes: str | tuple[str, ...]) -> tuple[str, str]:
         """取报告目录中排序第一份合规文件的（课程名, 报告名），用于阶段开始记录的标题。
 
-        找不到合规文件时返回空串对，由标题逻辑回退到占位名。
+        suffixes 可为单个后缀或后缀元组（doc 阶段传入 paths.document_suffixes，
+        pic/sen 阶段传入 .md）。找不到合规文件时返回空串对，由标题逻辑回退到占位名。
         """
         cfg = self.config
-        for path in sorted(Path(reports_dir).glob(f"*{suffix}")):
+        allowed = (suffixes,) if isinstance(suffixes, str) else tuple(suffixes)
+        allowed_set = {s.lower() for s in allowed}
+        try:
+            candidates = sorted(
+                p for p in Path(reports_dir).iterdir()
+                if p.is_file() and p.suffix.lower() in allowed_set)
+        except OSError:
+            return "", ""
+        for path in candidates:
             if path.name.startswith("~$"):
                 continue
             meta = parse_filename(path, name_format=cfg.paths.report_name_format,
                                   separator=cfg.paths.report_name_separator,
-                                  suffixes=(suffix,))
+                                  suffixes=(path.suffix.lower(),))
             if meta is not None:
                 return meta[0], meta[4]
         return "", ""
@@ -184,7 +197,7 @@ class Grader(RunLogMixin):
             hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
             # 日志第一步：先记录配置信息（控制台同步输出），再做占用检查与解析
             start_course, start_report_name = self._first_report_identity(
-                reports_dir, ".docx")
+                reports_dir, tuple(cfg.paths.document_suffixes))
             self._append_stage_start_entry(
                 stage="doc",
                 course=start_course,
@@ -194,6 +207,8 @@ class Grader(RunLogMixin):
                     "报告目录": str(reports_dir),
                     "评分模板": str(template),
                     "结果文件": str(hint) if hint else "",
+                    "文档后缀": "、".join(cfg.paths.document_suffixes),
+                    "MinerU档位": cfg.paths.mineru_tier,
                     "并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
@@ -208,6 +223,8 @@ class Grader(RunLogMixin):
                 name_format=cfg.paths.report_name_format,
                 separator=cfg.paths.report_name_separator,
                 tag_dep=tag_dep,
+                suffixes=tuple(cfg.paths.document_suffixes),
+                mineru_tier=cfg.paths.mineru_tier,
                 on_error=_on_parse_error,
                 workers=parse_workers,
                 max_attempts=max_attempts,
@@ -532,7 +549,11 @@ class Grader(RunLogMixin):
                     raise
                 _clear_resolved_caption_errors(reports)
 
-                # 整批完成后重试异常队列（只重试失败的 md 文件）
+                # 整批完成后重试异常队列（只重试失败的 md 文件）。
+                # 进入重试轮：vllm 并发（batch_size）按配置值减半——只减一次，
+                # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
+                retry_vllm = replace(cfg.vllm,
+                                     batch_size=max(1, cfg.vllm.batch_size // 2))
                 for retry in range(1, max_attempts):
                     pending_keys = _pending_keys()
                     pending_reports = [report_by_key[key] for key in pending_keys
@@ -540,8 +561,10 @@ class Grader(RunLogMixin):
                     if not pending_reports:
                         break
                     logger.warning(
-                        "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件（缺失图片重新识别后覆盖保存）",
-                        retry + 1, max_attempts, len(pending_reports))
+                        "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件"
+                        "（并发降为 %d，缺失图片重新识别后覆盖保存）",
+                        retry + 1, max_attempts, len(pending_reports),
+                        retry_vllm.batch_size)
                     # 只把仍缺描述的图片交给 vllm，已成功的图片不重复识别
                     missing_reports = [
                         replace(report,
@@ -552,7 +575,7 @@ class Grader(RunLogMixin):
                     if missing_reports:
                         try:
                             caption_images(
-                                missing_reports, cfg.vllm, cfg.prompts.image_prompt,
+                                missing_reports, retry_vllm, cfg.prompts.image_prompt,
                                 cancel=self.cancel_token, on_error=_on_caption_error,
                             )
                         except BaseException:
@@ -974,6 +997,9 @@ class Grader(RunLogMixin):
                     items=reports,
                     worker=lambda report: _grade_one(report, client, llm_rules),
                     workers=max(1, cfg.llm.batch_size),
+                    # 进入重试轮：llm 并发（batch_size）按配置值减半——只减一次，
+                    # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
+                    retry_workers=max(1, cfg.llm.batch_size // 2),
                     path_of=lambda report: Path(report.source_path),
                     label_of=_doc_name,
                     unit="份",
@@ -1099,6 +1125,32 @@ class Grader(RunLogMixin):
 
     # ------------------------------------------------------------------ 总流程调度
 
+    def _last_stage_has_errors(self) -> bool:
+        """最近结束的阶段是否存在错误（口径与阶段日志「状态」一致）。
+
+        阶段中断（error）或重试后仍失败（failed_count > 0）都算错误；仅中间
+        警告（warnings）不算，不阻断下一阶段。各阶段都在 ``finally`` 里收尾
+        登记阶段记录，因此阶段正常返回后 ``stage_logs[-1]`` 即该阶段的记录。
+        """
+        if not self.stage_logs:
+            return False
+        entry = self.stage_logs[-1]
+        return bool(entry.error) or entry.failed_count > 0
+
+    def _abort_followup_stages(self, finished: str, skipped: tuple[str, ...]) -> None:
+        """当前阶段已按“出错继续完成本阶段”收尾、但仍存在错误时中止后续阶段。
+
+        跳过原因写入控制台（ERROR）与运行日志，并抛出 ``RuntimeError``——
+        后续阶段不会执行，命令行入口统一转为退出码 1。
+        """
+        entry = self.stage_logs[-1]
+        detail = entry.error or f"最终失败 {entry.failed_count} 项"
+        message = (f"阶段 {finished} 存在错误（{detail}），已完成本阶段，"
+                   f"不再执行后续阶段（{'、'.join(skipped)} 未运行）")
+        logger.error("%s", message)
+        self._append_stage_event(stage=finished, level="错误", message=message)
+        raise RuntimeError(message)
+
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, stage: str = "full",
             skip_images: int = 2, tag_dep: str = "系部专业") -> Path | None:
@@ -1120,8 +1172,14 @@ class Grader(RunLogMixin):
 
         try:
             if stage == "full":
+                # 阶段内出错继续完成本阶段（各阶段自行容错）；
+                # 阶段之间：当前阶段结束后仍有错误时不再执行下一阶段
                 self.stage_doc(reports_dir, template, skip_images, tag_dep=tag_dep, output=output)
+                if self._last_stage_has_errors():
+                    self._abort_followup_stages("doc", ("pic", "sen"))
                 self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
+                if self._last_stage_has_errors():
+                    self._abort_followup_stages("pic", ("sen",))
                 return self.stage_sen(reports_dir, template, output, skip_images, tag_dep=tag_dep)
 
             if stage == "doc":

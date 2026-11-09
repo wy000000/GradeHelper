@@ -202,7 +202,7 @@ class TestLoadReportsWarnings(unittest.TestCase):
 
 
 class TestStageDocRecordsParseWarnings(unittest.TestCase):
-    """doc 阶段把 report.warnings（如 docling 回退）写入阶段日志。"""
+    """doc 阶段把 report.warnings（如 MinerU 中间错误）写入阶段日志。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -217,7 +217,7 @@ class TestStageDocRecordsParseWarnings(unittest.TestCase):
         report = ParsedReport(
             course="云安全", klass="安全2401", student_id="2021001", std_name="张三",
             report_name="课程报告", source_path=str(self.tmp / f"{BASE}.docx"),
-            md_text="正文\n", warnings=["docling 解析失败，回退 python-docx: boom"],
+            md_text="正文\n", warnings=["MinerU 解析失败: boom"],
         )
         rule = RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
                         evaluation="", comment="报告已提交，+25分")
@@ -231,7 +231,7 @@ class TestStageDocRecordsParseWarnings(unittest.TestCase):
                              output=self.result_path)
 
         entry = grader.stage_logs[-1]
-        self.assertTrue(any("docling 解析失败" in w for w in entry.warnings))
+        self.assertTrue(any("MinerU 解析失败" in w for w in entry.warnings))
 
 
 if __name__ == "__main__":

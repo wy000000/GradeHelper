@@ -70,7 +70,7 @@ class ParsedReport:
     student_id: str               # 学号
     std_name: str                 # 学生姓名
     report_name: str              # 报告名称（如“期中报告”、“课程设计”等）
-    source_path: str              # 原 docx 路径
+    source_path: str              # 原始文档路径（docx/doc/pdf 等）
     md_text: str                  # Markdown 正文（图片处为占位符 [[PIC:Pn]]）
     images: list[ReportImage] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

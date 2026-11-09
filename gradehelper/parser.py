@@ -1,8 +1,11 @@
-"""报告解析：docx → Markdown + 图片，全部驻留内存。
+"""报告解析：文档 → Markdown + 图片，全部驻留内存。
 
-- 主解析器：docling（版面分析，表格/图片/阅读顺序还原更准确）
-- 兜底解析器：python-docx（docling 失败时使用）
-- 文件名格式：课程名称-专业班级-学号-姓名.docx（课程名称可含 '-'，按右侧三段切分）
+- 解析器：MinerU 4.x（``mineru.parser.parse``），支持 PDF / DOC / DOCX 等格式，
+  版面分析、表格、图片与阅读顺序还原更准确；
+- 解析失败即记为失败文档（无本地兜底解析器），由批处理重试并按阶段容错；
+- 可处理的文档后缀由 ``config.yaml`` 的 ``paths.document_suffixes`` 决定，
+  默认 ``.docx`` / ``.doc`` / ``.pdf``；
+- 文件名格式：课程名称-专业班级-学号-姓名.ext（课程名称可含 '-'，按右侧三段切分）
 - md 中图片位置使用占位符 [[PIC:Pn]] 或 [[PIC:base_name-Pn.ext]]，后续由 vllm 描述结果替换
 """
 
@@ -10,30 +13,36 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import unquote
 
 from .batch import run_file_batch
+from .config import DEFAULT_DOCUMENT_SUFFIXES
 from .models import ParsedReport, ReportImage
 
 logger = logging.getLogger(__name__)
 
-DOCX_SUFFIX = ".docx"
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".jp2"}
 PIC_PATTERN = re.compile(r"\[\[PIC:([^\]]+)\]\]")
+
+# MinerU 4.x 的本地解析档位；办公文档只支持 flash（原生解析），PDF/图片可用其它档位
+MINERU_TIERS = {"flash", "basic", "standard", "advanced"}
+MINERU_MARKDOWN_NAME = "markdown.md"
 
 
 def parse_filename(
     path: Path,
     name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
     separator: str = "-",
-    suffixes: tuple[str, ...] = (DOCX_SUFFIX,),
+    suffixes: tuple[str, ...] = DEFAULT_DOCUMENT_SUFFIXES,
 ) -> tuple[str, str, str, str, str] | None:
     """按可配置的命名格式解析文件名；不符合格式返回 None。
 
     name_format 中的占位符（如 {course}、{klass}、{student_id}、{stdName}、{reportName}）决定
     从文件名右侧切分出多少段以及每段对应的字段名；separator 为分隔符；
-    suffixes 限定允许的文件扩展名（默认仅 .docx）。
+    suffixes 限定允许的文件扩展名（默认 .docx / .doc / .pdf）。
     """
     if path.suffix.lower() not in suffixes or path.name.startswith("~$"):
         return None
@@ -59,16 +68,23 @@ def scan_reports(
     reports_dir: str | Path,
     name_format: str = "{course}-{klass}-{student_id}-{name}",
     separator: str = "-",
+    suffixes: tuple[str, ...] = DEFAULT_DOCUMENT_SUFFIXES,
 ) -> list[Path]:
-    """扫描目录本身（不含子目录），仅保留文件名格式正确的 docx。"""
+    """扫描目录本身（不含子目录），仅保留后缀与文件名格式都符合的报告。
+
+    suffixes 默认为 .docx / .doc / .pdf；只扫描该目录顶层，不搜索子目录。
+    """
     root = Path(reports_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"报告目录不存在: {root}")
+    allowed = {s.lower() for s in suffixes}
+    allowed_tuple = tuple(allowed)
     return [
         p for p in sorted(root.iterdir())
         if p.is_file()
-        and p.suffix.lower() == DOCX_SUFFIX
-        and parse_filename(path=p, name_format=name_format, separator=separator) is not None
+        and p.suffix.lower() in allowed
+        and parse_filename(path=p, name_format=name_format, separator=separator,
+                           suffixes=allowed_tuple) is not None
     ]
 
 
@@ -86,295 +102,165 @@ def _sniff_ext(data: bytes) -> str | None:
     return None
 
 
-def _content_key(data: bytes) -> str:
-    import hashlib
-    return hashlib.md5(data).hexdigest()
+# ---------------------------------------------------------------- MinerU 主解析
+
+# Markdown 图片语法 ![alt](path) 与 HTML <img src="path">；两条正则用于按正文顺序定位图片
+_MD_IMAGE_REF = re.compile(r"!\[[^\]]*]\(\s*<?([^)>\s]+)>?\s*\)")
+_HTML_IMAGE_REF = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+_IMAGE_COMMENT = re.compile(r"<!--\s*image\s*-->", re.IGNORECASE)
 
 
-# ---------------------------------------------------------------- docling 主解析
+def _iter_image_refs(md: str) -> list[tuple[int, int, str]]:
+    """按在 Markdown 中出现的顺序返回 (起始, 结束, 图片引用) 列表。"""
+    refs: list[tuple[int, int, str]] = []
+    refs.extend((m.start(), m.end(), m.group(1)) for m in _MD_IMAGE_REF.finditer(md))
+    refs.extend((m.start(), m.end(), m.group(1)) for m in _HTML_IMAGE_REF.finditer(md))
+    refs.sort(key=lambda item: item[0])
+    # 去掉重叠匹配（例如 Markdown 图片语法恰好位于 HTML 标签内）
+    merged: list[tuple[int, int, str]] = []
+    last_end = -1
+    for start, end, ref in refs:
+        if start >= last_end:
+            merged.append((start, end, ref))
+            last_end = end
+    return merged
 
-def _extract_picture_bytes(doc, item, warnings: list[str]) -> tuple[bytes | None, str | None]:
-    """从 docling 文档工件中取图片二进制与文件名。"""
-    art_no = getattr(item, "image_item_no", None)
-    if art_no is None:
-        return None, None
-    try:
-        artifact = doc.artifacts[art_no]
-    except (IndexError, KeyError, TypeError) as exc:
-        warnings.append(f"读取 docling 图片工件失败(#{art_no}): {exc}")
-        return None, None
-    binary = getattr(artifact, "binary", None)
-    if binary:
-        return bytes(binary), _artifact_name(artifact)
-    uri = getattr(artifact, "uri", None)
-    if uri:
+
+def _resolve_image_file(root: Path, ref: str) -> Path | None:
+    """把 Markdown 中的图片引用解析为本地文件；远程/内联图片返回 None。"""
+    lowered = ref.lower()
+    if lowered.startswith(("data:", "http://", "https://")):
+        return None
+    clean = unquote(ref.split("#", 1)[0].split("?", 1)[0]).strip().replace("\\", "/")
+    if not clean:
+        return None
+    path = Path(clean)
+    return path if path.is_absolute() else root / clean
+
+
+def _mineru_asset_dir(out_dir: Path) -> Path:
+    """MinerU 保存结果的图片目录（不同版本可能为 images/ 或输出目录本身）。"""
+    images_dir = out_dir / "images"
+    return images_dir if images_dir.is_dir() else out_dir
+
+
+def _read_mineru_markdown(out_dir: Path) -> str:
+    """读取 MinerU 落盘的 Markdown；找不到标准文件名时退化为任意 .md。"""
+    md_path = out_dir / MINERU_MARKDOWN_NAME
+    if not md_path.is_file():
+        candidates = sorted(p for p in out_dir.rglob("*.md") if p.is_file())
+        if not candidates:
+            raise RuntimeError("MinerU 未生成 Markdown 文件")
+        md_path = candidates[0]
+    return md_path.read_text(encoding="utf-8")
+
+
+def _materialize_mineru_images(md: str, out_dir: Path, base_name: str,
+                               warnings: list[str]) -> tuple[str, list[ReportImage]]:
+    """把 MinerU 的图片引用替换为 [[PIC:base_name-Pn.ext]]，并读取图片二进制。
+
+    图片按 Markdown 中的出现顺序编号；未被引用的图片（含 ``<!-- image -->`` 占位）
+    依次回填，最终仍未定位的追加到正文末尾，确保图片不丢失。
+    """
+    images: list[ReportImage] = []
+    replacements: list[tuple[int, int, str]] = []
+    referenced: set[Path] = set()
+
+    def _add_image(file_path: Path, data: bytes) -> str:
+        ext = (_sniff_ext(data)
+               or file_path.suffix.lower().lstrip(".")
+               or "png")
+        images.append(ReportImage(index=len(images) + 1, ext=ext, data=data))
+        return f"[[PIC:{base_name}-P{images[-1].index}.{ext}]]"
+
+    for start, end, ref in _iter_image_refs(md):
+        file_path = _resolve_image_file(out_dir, ref)
+        data: bytes | None = None
+        if file_path is not None:
+            try:
+                data = file_path.read_bytes()
+            except OSError as exc:
+                warnings.append(f"读取 MinerU 图片失败({ref}): {exc}")
+        if data is None:
+            replacements.append((start, end, ""))
+            continue
+        referenced.add(file_path.resolve())
+        replacements.append((start, end, _add_image(file_path, data)))
+
+    # 从后往前替换，避免前面的替换影响后面的偏移
+    for start, end, replacement in reversed(replacements):
+        md = md[:start] + replacement + md[end:]
+
+    # 未被 Markdown 引用的图片文件（按路径排序，保持稳定顺序）
+    unused: list[Path] = []
+    for file_path in sorted(_mineru_asset_dir(out_dir).rglob("*")):
+        if not file_path.is_file() or file_path.suffix.lower() not in IMAGE_EXTS:
+            continue
+        if file_path.resolve() in referenced:
+            continue
+        unused.append(file_path)
+
+    def _placeholder_for(file_path: Path) -> str:
         try:
-            return Path(uri).read_bytes(), Path(uri).name
+            data = file_path.read_bytes()
         except OSError as exc:
-            warnings.append(f"读取 docling 图片文件失败({uri}): {exc}")
-    return None, None
+            warnings.append(f"读取 MinerU 图片失败({file_path.name}): {exc}")
+            return ""
+        return _add_image(file_path, data)
+
+    # 先回填 MinerU 可能留下的 `<!-- image -->` 注释占位
+    if unused:
+        def _sub_comment(_match: re.Match) -> str:
+            return _placeholder_for(unused.pop(0)) if unused else ""
+
+        md = _IMAGE_COMMENT.sub(_sub_comment, md)
+
+    # 仍未定位的图片追加到正文末尾
+    trailing = [_placeholder_for(file_path) for file_path in unused]
+    trailing = [item for item in trailing if item]
+    if trailing:
+        md = md.rstrip() + "\n\n" + "\n".join(trailing) + "\n"
+
+    return md, images
 
 
-def _artifact_name(artifact) -> str:
-    uri = getattr(artifact, "uri", None)
-    return Path(uri).name if uri else ""
+def _mineru_tier(path: Path, configured: str) -> str:
+    """选择 MinerU 解析档位。
+
+    PDF/图片支持 flash/basic/standard/advanced，使用配置值（默认 standard）；
+    办公文档（doc/docx 等）由 MinerU 以本地 flash 原生解析，不能使用其它档位。
+    """
+    if path.suffix.lower() in {".pdf"} | IMAGE_EXTS:
+        tier = (configured or "standard").strip().lower()
+        return tier if tier in MINERU_TIERS else "standard"
+    return "flash"
 
 
-def _replace_image_ref(md: str, art_name: str, placeholder: str) -> str:
-    """把 md 中引用 art_name 的图片语法替换为占位符。"""
-    pattern = re.compile(
-        r"!\[[^\]]*]\(\s*<?[^)\s]*" + re.escape(art_name) + r"[^)\s]*>?\s*\)",
-        re.IGNORECASE,
-    )
-    new_md, n = pattern.subn(placeholder, md, count=1)
-    if n == 0:  # 退化：仅替换文件名
-        new_md = md.replace(art_name, placeholder, 1)
-    return new_md
+def _mineru_parse(path: Path, base_name: str, warnings: list[str],
+                  tier: str = "standard") -> tuple[str, list[ReportImage]]:
+    """用 MinerU 解析文档，返回 (md 文本, 图片列表)；md 中图片位置为占位符。
 
-
-def _docling_parse(path: Path, base_name: str,
-                   warnings: list[str]) -> tuple[str, list[ReportImage]]:
-    """用 docling 解析 docx，返回 (md 文本, 图片列表)。md 中图片位置为占位符。
-
-    docling 对 DOCX 默认不导出图片工件（Markdown 中为 `<!-- image -->` 注释），
-    因此 Markdown 由 docling 生成，图片二进制在工件不可用时用 python-docx
-    按正文顺序提取后依次回填占位位置。
+    支持 PDF / DOC / DOCX（以及 MinerU 自身支持的其它格式，只要
+    ``paths.document_suffixes`` 允许）。MinerU 先保存到临时目录，读取其
+    ``markdown.md`` 与 ``images/`` 后再全部载入内存，临时目录随即删除。
 
     占位符格式：[[PIC:{base_name}-P{index}.{ext}]]
     """
-    from docling.document_converter import DocumentConverter
-
-    doc = DocumentConverter().convert(str(path)).document
-    md = doc.export_to_markdown() or ""
-
-    # 1) 优先尝试 docling 自带图片工件（不同版本支持程度不同）
-    pictures = sorted(
-        doc.pictures,
-        key=lambda it: ((getattr(it, "page_no", 0) or 0),
-                        (getattr(getattr(it, "bbox", None), "t", 0) or 0)),
-    )
-    images: list[ReportImage] = []
-    artifact_names: list[str] = []
-    for item in pictures:
-        data, art_name = _extract_picture_bytes(doc, item, warnings)
-        if data is None:
-            continue
-        ext = _sniff_ext(data) or Path(art_name or "").suffix.lstrip(".") or "png"
-        images.append(ReportImage(index=len(images) + 1, ext=ext, data=data))
-        if art_name:
-            artifact_names.append(art_name)
-
-    # 2) 工件不可用时，用 python-docx 按正文出现顺序提取
-    if not images:
-        images = _extract_ordered_images(path, warnings)
-
-    # 3) 把 md 中的图片位置替换为占位符 [[PIC:base_name-Pn.ext]]
-    for idx, art_name in enumerate(artifact_names, start=1):
-        if idx <= len(images) and art_name and art_name in md:
-            img = images[idx - 1]
-            md = _replace_image_ref(md, art_name, f"[[PIC:{base_name}-P{img.index}.{img.ext}]]")
-    md = _place_placeholders(md, images, base_name)
-
-    return md, images
-
-
-def _extract_ordered_images(path: Path, warnings: list[str]) -> list[ReportImage]:
-    """python-docx 按正文出现顺序提取图片（内容去重，保持首现顺序）。"""
-    import docx
-    from docx.oxml.ns import qn
-
-    document = docx.Document(str(path))
-    images: list[ReportImage] = []
-    seen: set[str] = set()
-    for blip in document.element.body.findall(".//" + qn("a:blip")):
-        rid = blip.get(qn("r:embed"))
-        if not rid or rid not in document.part.rels:
-            if rid:
-                warnings.append(f"图片关系缺失，无法读取: {rid}")
-            continue
-        try:
-            blob = document.part.rels[rid].target_part.blob
-        except (KeyError, OSError) as exc:
-            warnings.append(f"读取文档图片失败({rid}): {exc}")
-            continue
-        key = _content_key(blob)
-        if key in seen:
-            continue
-        seen.add(key)
-        images.append(ReportImage(index=len(images) + 1,
-                                  ext=_sniff_ext(blob) or "png", data=blob))
-    if not images:  # 最终兜底：word/media 全量
-        images = [ReportImage(index=i, ext=ext, data=data)
-                  for i, (data, ext) in enumerate(_extract_media(path, warnings), start=1)]
-    return images
-
-
-def _place_placeholders(md: str, images: list[ReportImage], base_name: str) -> str:
-    """按出现顺序把 md 中的图片位置替换为 [[PIC:base_name-Pn.ext]]；未定位的占位符追加到文末。"""
-    if not images:
-        return md
-    n = 0
-
-    def _sub_comment(_match: re.Match) -> str:
-        nonlocal n
-        n += 1
-        if n <= len(images):
-            img = images[n - 1]
-            return f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
-        return ""
-
-    # docling 的 `<!-- image -->` 注释占位
-    md = re.sub(r"<!--\s*image\s*-->", _sub_comment, md, flags=re.IGNORECASE)
-    if n < len(images):  # 剩余图片按 markdown 图片语法位置回填
-
-        def _sub_mdimg(_match: re.Match) -> str:
-            nonlocal n
-            n += 1
-            if n <= len(images):
-                img = images[n - 1]
-                return f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
-            return ""
-
-        md = re.sub(r"!\[[^\]]*]\([^)]*\)", _sub_mdimg, md)
-
-    total = len(PIC_PATTERN.findall(md))
-    if total < len(images):  # 仍未定位的图片，占位符追加到文末
-        existing_indices = {
-            int(m.split("-P")[-1].split(".")[0])
-            for m in PIC_PATTERN.findall(md)
-            if "-P" in m
-        }
-        missing = [img for img in images if img.index not in existing_indices]
-        md += "\n\n" + "\n".join(
-            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]" for img in missing
-        )
-    elif total > len(images):  # 多余占位符清理
-        for img in images:
-            placeholder = f"[[PIC:{base_name}-P{img.index}.{img.ext}]]"
-            count = md.count(placeholder)
-            if count > 1:
-                md = md.replace(placeholder, "", count - 1)
-    return md
-
-
-# ------------------------------------------------------------ python-docx 兜底解析
-
-def _looks_like_list(text: str) -> bool:
-    stripped = text.lstrip()
-    return bool(re.match(r"^([-*·•]|\d+[.、)]|[（(]\d+[)）])\s+\S", stripped))
-
-
-def _table_to_md(table) -> list[str]:
-    rows = []
-    for r in table.rows:
-        cells = [c.text.strip().replace("\n", " ") for c in r.cells]
-        rows.append("| " + " | ".join(cells) + " |")
-    if len(rows) >= 2:
-        rows.insert(1, "|" + "---|" * len(table.columns))
-    return rows
-
-
-def _collect_inline_images(para, images: list[ReportImage], seen: set[str],
-                           warnings: list[str]) -> None:
-    """按行内 blip 关系提取图片 bytes，段落文本中追加 [[IMG:n]] 占位。"""
-    from docx.oxml.ns import qn
-
-    part = para.part
-    for blip in para._p.findall(".//" + qn("a:blip")):
-        rid = blip.get(qn("r:embed"))
-        if not rid or rid not in part.rels:
-            if rid:
-                warnings.append(f"图片关系缺失，无法读取: {rid}")
-            continue
-        try:
-            blob = part.rels[rid].target_part.blob
-        except (KeyError, OSError) as exc:
-            warnings.append(f"读取文档图片失败({rid}): {exc}")
-            continue
-        key = _content_key(blob)
-        if key in seen:
-            continue
-        seen.add(key)
-        ext = _sniff_ext(blob) or "png"
-        images.append(ReportImage(index=len(images) + 1, ext=ext, data=blob))
-        para.text += f"[[IMG:{len(images)}]]"  # 仅内存对象，不影响磁盘文件
-
-
-def _extract_media(path: Path, warnings: list[str] | None = None) -> list[tuple[bytes, str]]:
-    """直接从 docx 压缩包的 word/media 提取全部图片（兜底补充）。"""
-    import zipfile
-
-    out: list[tuple[bytes, str]] = []
     try:
-        with zipfile.ZipFile(path) as z:
-            for name in sorted(z.namelist()):
-                if name.startswith("word/media/"):
-                    data = z.read(name)
-                    sniffed = _sniff_ext(data)
-                    ext = sniffed or Path(name).suffix.lstrip(".").lower() or "png"
-                    if f".{ext}" in IMAGE_EXTS or sniffed:
-                        out.append((data, ext))
-    except (OSError, zipfile.BadZipFile) as exc:
-        if warnings is not None:
-            warnings.append(f"读取 docx 压缩包图片失败: {exc}")
-    return out
+        from mineru.parser import parse as mineru_parse
+        from mineru.parser.writer import FileBasedDataWriter
+    except ImportError as exc:  # 延迟导入：未安装 MinerU 时不影响其它阶段
+        raise RuntimeError(
+            "未安装 MinerU（需要 mineru>=4.0）："
+            'pip install "mineru>=4.0,<5"'
+        ) from exc
 
-
-def _docx_fallback_parse(path: Path, base_name: str,
-                         warnings: list[str]) -> tuple[str, list[ReportImage]]:
-    """python-docx 兜底：段落/表格转 md，图片按行内关系 + word/media 提取。"""
-    import docx
-    from docx.oxml.ns import qn
-    from docx.table import Table
-    from docx.text.paragraph import Paragraph
-
-    document = docx.Document(str(path))
-    lines: list[str] = []
-    images: list[ReportImage] = []
-    seen: set[str] = set()
-
-    for child in document.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            para = Paragraph(child, document)
-            _collect_inline_images(para, images, seen, warnings)
-            text = para.text.strip()
-            if not text:
-                lines.append("")
-                continue
-            style = (para.style.name or "") if para.style is not None else ""
-            if style.lower().startswith("heading"):
-                try:
-                    level = min(int(style.split()[-1]), 6)
-                except (ValueError, IndexError):
-                    level = 2
-                lines.append("#" * level + " " + text)
-            elif _looks_like_list(text):
-                lines.append("- " + text.lstrip("-*·• \t"))
-            else:
-                lines.append(text)
-        elif child.tag == qn("w:tbl"):
-            lines.extend(_table_to_md(Table(child, document)))
-
-    # word/media 中未通过行内关系取到的图片，按压缩包内顺序补充
-    for data, ext in _extract_media(path, warnings):
-        if _content_key(data) in seen:
-            continue
-        images.append(ReportImage(index=len(images) + 1, ext=ext, data=data))
-
-    md = "\n\n".join(lines)
-    for img in images:
-        md = md.replace(
-            f"[[IMG:{img.index}]]",
-            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]",
-            1,
-        )
-    located = {m.split("-P")[-1].split(".")[0] for m in PIC_PATTERN.findall(md) if "-P" in m}
-    missing = [img for img in images if str(img.index) not in located]
-    if missing:
-        md += "\n\n" + "\n".join(
-            f"[[PIC:{base_name}-P{img.index}.{img.ext}]]" for img in missing
-        )
-    return md, images
+    with tempfile.TemporaryDirectory(prefix="gradehelper-mineru-") as tmp:
+        out_dir = Path(tmp)
+        result = mineru_parse(str(path), tier=_mineru_tier(path, tier))
+        result.save(FileBasedDataWriter(str(out_dir)))
+        md = _read_mineru_markdown(out_dir)
+        return _materialize_mineru_images(md, out_dir, base_name, warnings)
 
 
 # ------------------------------------------------------------------------ 对外接口
@@ -384,9 +270,12 @@ def parse_report(
     name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
     separator: str = "-",
     tag_dep: str = "系部专业",
+    suffixes: tuple[str, ...] = DEFAULT_DOCUMENT_SUFFIXES,
+    mineru_tier: str = "standard",
 ) -> ParsedReport:
-    """解析单份报告；docling 优先，失败回退 python-docx。"""
-    meta = parse_filename(path, name_format=name_format, separator=separator)
+    """解析单份报告：MinerU 解析失败即抛出异常（无本地兜底）。"""
+    meta = parse_filename(path, name_format=name_format, separator=separator,
+                          suffixes=suffixes)
     if meta is None:
         raise ValueError(
             f"文件名不符合命名格式 '{name_format}'（分隔符: {separator!r}）: {path.name}"
@@ -396,17 +285,9 @@ def parse_report(
     warnings: list[str] = []
     base_name = f"{course}{separator}{klass}{separator}{student_id}{separator}{std_name}{separator}{report_name}"
     try:
-        md, images = _docling_parse(path, base_name, warnings)
-    except Exception as exc:  # docling 依赖模型，任何异常都走兜底
-        warnings.append(f"docling 解析失败，回退 python-docx: {exc}")
-        logger.warning("%s: docling 解析失败(%s)，回退 python-docx", path.name, exc)
-        try:
-            md, images = _docx_fallback_parse(path, base_name, warnings)
-        except Exception as fallback_exc:
-            # 兜底也失败：把两次失败原因都带上，便于运行日志定位中间错误
-            raise RuntimeError(
-                f"docling 解析失败({exc})，python-docx 兜底也失败({fallback_exc})"
-            ) from fallback_exc
+        md, images = _mineru_parse(path, base_name, warnings, tier=mineru_tier)
+    except Exception as exc:  # MinerU 依赖模型/外部文件，任何异常都记为失败文档
+        raise RuntimeError(f"MinerU 解析失败: {exc}") from exc
 
     return ParsedReport(course=course, klass=klass, student_id=student_id, std_name=std_name,
                         report_name=report_name, tag_dep=tag_dep,
@@ -419,12 +300,17 @@ def parse_all(
     name_format: str = "{course}-{klass}-{student_id}-{stdName}-{reportName}",
     separator: str = "-",
     tag_dep: str = "系部专业",
+    suffixes: tuple[str, ...] = DEFAULT_DOCUMENT_SUFFIXES,
+    mineru_tier: str = "standard",
     on_error: Callable[[Path, Exception], None] | None = None,
     workers: int = 1,
     max_attempts: int = 2,
     on_retry: Callable[[Path, Exception, int], None] | None = None,
 ) -> list[ParsedReport]:
     """扫描并多线程解析目录下所有合规报告，解析结果全部驻留内存。
+
+    suffixes 决定扫描哪些文档后缀（默认 .docx / .doc / .pdf）；
+    mineru_tier 决定 PDF/图片的解析档位（办公文档固定使用 MinerU 的 flash 原生解析）。
 
     - 单份文档解析失败不会中断其它文档；
     - 失败文件进入异常队列，全部解析完成后自动重试；
@@ -434,7 +320,8 @@ def parse_all(
     ``on_error`` 只在重试结束后对最终仍失败的文档调用一次，
     因此不会因重试产生重复的失败记录。
     """
-    paths = scan_reports(reports_dir, name_format=name_format, separator=separator)
+    paths = scan_reports(reports_dir, name_format=name_format, separator=separator,
+                         suffixes=suffixes)
 
     def _on_final_failure(failed) -> None:
         logger.error("解析失败 %s: %s", failed.path.name, failed.reason)
@@ -455,7 +342,8 @@ def parse_all(
         stage="doc",
         items=paths,
         worker=lambda path: parse_report(
-            path, name_format=name_format, separator=separator, tag_dep=tag_dep),
+            path, name_format=name_format, separator=separator, tag_dep=tag_dep,
+            suffixes=suffixes, mineru_tier=mineru_tier),
         workers=max(1, int(workers)),
         path_of=lambda path: path,
         label_of=lambda path: path.name,
@@ -532,7 +420,7 @@ def _placeholder_index(token: str) -> int | None:
 def remove_skipped_placeholders(md: str, skip_images: int) -> str:
     """移除被跳过图片（编号 1..skip_images）的占位符，其余占位符保持原样。
 
-    md 中的占位符可能是短格式 [[PIC:Pn]]（测试/兜底），也可能是解析时写入的
+    md 中的占位符可能是短格式 [[PIC:Pn]]（测试或旧版产物），也可能是解析时写入的
     完整格式 [[PIC:base_name-Pn.ext]]；无法解析出编号的占位符不删除。
     """
     if skip_images <= 0 or "[[PIC:" not in md:

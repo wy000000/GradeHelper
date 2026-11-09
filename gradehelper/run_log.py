@@ -122,6 +122,7 @@ class RunLogMixin:
                     reports_dir,
                     name_format=cfg.paths.report_name_format,
                     separator=cfg.paths.report_name_separator,
+                    suffixes=tuple(cfg.paths.document_suffixes),
                 )
             except OSError:
                 candidates = []
