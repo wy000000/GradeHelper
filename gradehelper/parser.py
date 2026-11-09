@@ -15,7 +15,7 @@ import logging
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote
@@ -109,6 +109,66 @@ def scan_reports(
         and parse_filename(path=p, name_format=name_format, separator=separator,
                            suffixes=allowed_tuple) is not None
     ]
+
+
+# ---------------------------------------------------------------- 指定文件（--files）
+
+# 名单中表示“不过滤”的取值（不区分大小写）
+_NO_FILE_TOKENS = {"none", "null"}
+
+
+def normalize_file_names(values: str | Iterable[str] | None) -> list[str]:
+    """把 ``--files`` 的原始值规范化为文件名列表；``none``/空值表示不过滤。
+
+    兼容 ``"a.docx,b.docx"``、``"a.docx;b.docx"``、``["a.docx", "b.docx"]``
+    与 ``"a.docx b.docx"`` 四种写法（逗号/分号/空白均视为分隔符）；
+    去空、去重并保持顺序，因此同一份名单可在 doc / pic / sen 三个阶段复用。
+    """
+    if values is None:
+        return []
+    raw = [values] if isinstance(values, str) else [str(item) for item in values]
+    names: list[str] = []
+    for item in raw:
+        for token in re.split(r"[,;，；\s]+", item):
+            name = token.strip()
+            if not name or name.casefold() in _NO_FILE_TOKENS:
+                continue
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def select_paths(paths: Iterable[Path],
+                 names: list[str]) -> tuple[list[Path], list[str]]:
+    """按文件名筛选路径，返回 ``(命中的路径, 未命中的名字)``。
+
+    同时接受完整文件名（``...-课程报告.docx``）与不含后缀的主名
+    （``...-课程报告``），均忽略大小写；因此同一份名单既能在 doc 阶段命中
+    原始文档，也能在 pic / sen 阶段命中同名 ``.md``（写 ``.docx`` 也会按主名命中 ``.md``）。
+    ``names`` 为空表示不过滤，原样返回全部路径。
+    """
+    path_list = list(paths)
+    if not names:
+        return path_list, []
+
+    def _keys(name: str) -> set[str]:
+        # 完整名与主名都参与匹配：名单写 .docx 也能命中 pic/sen 的同名 .md
+        return {name.casefold(), Path(name).stem.casefold()}
+
+    keys: set[str] = set()
+    for name in names:
+        keys.update(_keys(name))
+    matched: list[Path] = []
+    hit: set[str] = set()
+    for path in path_list:
+        name_key = path.name.casefold()
+        stem_key = path.stem.casefold()
+        if name_key in keys or stem_key in keys:
+            matched.append(path)
+            hit.add(name_key)
+            hit.add(stem_key)
+    unmatched = [name for name in names if not (_keys(name) & hit)]
+    return matched, unmatched
 
 
 def _sniff_ext(data: bytes) -> str | None:

@@ -30,8 +30,8 @@ from .llm_grading import (
 )
 from .models import ItemScore, ParsedReport, ReportImage, RuleItem
 from .parser import (
-    embed_captions, has_image_caption, parse_all, parse_filename,
-    remove_skipped_placeholders, scan_reports, strip_blank_lines,
+    embed_captions, has_image_caption, normalize_file_names, parse_all, parse_filename,
+    remove_skipped_placeholders, scan_reports, select_paths, strip_blank_lines,
 )
 from .report_io import (
     load_one_report_for_pic, load_reports_for_pic, save_parsed, save_parsed_batch,
@@ -63,12 +63,43 @@ def _report_needs_llm_grading(student_id: str,
     return any(not _llm_item_scored(row.get(rule.key)) for rule in llm_rules)
 
 
+def _run_mode_label(incremental: bool, files: list[str]) -> str:
+    """阶段配置的「模式」：范围（全部/指定）× 方式（全量/增量）。"""
+    return ("指定" if files else "全部") + ("增量" if incremental else "全量")
+
+
+def _files_label(files: list[str]) -> str:
+    """阶段配置的「指定文件」：文件数与名单（名单过长时只列前 10 个）。"""
+    shown = files[:10]
+    text = "、".join(shown)
+    if len(files) > len(shown):
+        text += f" 等 {len(files)} 个"
+    return f"{len(files)} 个（{text}）"
+
+
+def _select_reports(reports: list[ParsedReport],
+                    names: list[str]) -> tuple[list[ParsedReport], list[str]]:
+    """按 ``--files`` 名单筛选已加载的报告（主名或完整 md 名，忽略大小写）。
+
+    返回 ``(命中的报告, 未命中的名字)``；``names`` 为空表示不过滤。
+    """
+    if not names:
+        return list(reports), []
+    matched, unmatched = select_paths(
+        [Path(report.source_path) for report in reports], names)
+    allowed = {str(path) for path in matched}
+    return ([report for report in reports if str(Path(report.source_path)) in allowed],
+            unmatched)
+
+
 class Grader(RunLogMixin):
     def __init__(self, config: AppConfig):
         self.config = config
         # 增量模式：doc 只解析结果文件中无记录的文档；pic 只识别缺描述的图片；
         # sen 只评分 LLM 项未评分的报告。由启动参数 --incremental true/false 控制。
         self.incremental = False
+        # 指定文件（--files）：非空时增量/全量只对名单内的文件有效。
+        self.files: list[str] = []
         self._init_run_log()
         # 全局取消令牌：Ctrl+C / 异常退出时关闭在飞 LLM 连接，让服务端停止生成
         self.cancel_token = CancelToken()
@@ -100,11 +131,13 @@ class Grader(RunLogMixin):
         ensure_result_writable(result_path)
 
     def _first_report_identity(self, reports_dir: str | Path,
-                               suffixes: str | tuple[str, ...]) -> tuple[str, str]:
+                               suffixes: str | tuple[str, ...],
+                               names: list[str] | None = None) -> tuple[str, str]:
         """取报告目录中排序第一份合规文件的（课程名, 报告名），用于阶段开始记录的标题。
 
         suffixes 可为单个后缀或后缀元组（doc 阶段传入 paths.document_suffixes，
-        pic/sen 阶段传入 .md）。找不到合规文件时返回空串对，由标题逻辑回退到占位名。
+        pic/sen 阶段传入 .md）。names 非空时只看 --files 名单内的文件；
+        找不到合规文件时返回空串对，由标题逻辑回退到占位名。
         """
         cfg = self.config
         allowed = (suffixes,) if isinstance(suffixes, str) else tuple(suffixes)
@@ -118,6 +151,10 @@ class Grader(RunLogMixin):
         for path in candidates:
             if path.name.startswith("~$"):
                 continue
+            if names:
+                matched, _unmatched = select_paths([path], names)
+                if not matched:
+                    continue
             meta = parse_filename(path, name_format=cfg.paths.report_name_format,
                                   separator=cfg.paths.report_name_separator,
                                   suffixes=(path.suffix.lower(),))
@@ -221,7 +258,7 @@ class Grader(RunLogMixin):
             hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
             # 日志第一步：先记录配置信息（控制台同步输出），再做占用检查与解析
             start_course, start_report_name = self._first_report_identity(
-                reports_dir, tuple(cfg.paths.document_suffixes))
+                reports_dir, tuple(cfg.paths.document_suffixes), self.files)
             self._append_stage_start_entry(
                 stage="doc",
                 course=start_course,
@@ -236,13 +273,15 @@ class Grader(RunLogMixin):
                     "并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "增量模式": ("开启（仅解析结果文件中无记录的文档）"
-                                 if self.incremental else "关闭"),
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             self._ensure_result_writable(hint)
             claim = ResultFileClaim(hint)
             claim.acquire()
+            # 指定文件（--files）：先扫描目录并按名单筛选，未命中的名字逐条告警；
+            # 全部未命中时报错退出，避免“指定了文件却什么都没做”仍返回成功。
             # 增量 doc：以结果文件 result 表中的学号记录为准，只解析没有记录的文档；
             # 结果文件不存在（首次运行）时解析全部文档。
             pending_paths: list[Path] | None = None
@@ -255,7 +294,7 @@ class Grader(RunLogMixin):
                     suffixes=(path.suffix.lower(),))
                 return meta[2] if meta is not None else ""
 
-            if self.incremental:
+            if self.files or self.incremental:
                 try:
                     all_docs = scan_reports(
                         reports_dir,
@@ -265,22 +304,39 @@ class Grader(RunLogMixin):
                     )
                 except OSError:
                     all_docs = []
-                recorded_ids: set[str] | None = None
-                if hint is not None and hint.is_file():
-                    recorded_ids = set(read_result_items(hint))
-                if recorded_ids is None:
-                    logger.info("【阶段 doc】增量模式：结果文件不存在，解析全部 %d 个文档",
-                                len(all_docs))
+                if self.files:
+                    all_docs, unmatched = select_paths(all_docs, self.files)
+                    for name in unmatched:
+                        _record_event(
+                            "警告",
+                            f"指定的文件未找到（或不符合命名格式）: {name}")
+                    if not all_docs:
+                        raise RuntimeError(
+                            "指定的文件在报告目录中没有找到: "
+                            f"{reports_dir}\n指定文件：{'、'.join(self.files)}")
+                if self.incremental:
+                    recorded_ids: set[str] | None = None
+                    if hint is not None and hint.is_file():
+                        recorded_ids = set(read_result_items(hint))
+                    if recorded_ids is None:
+                        logger.info("【阶段 doc】增量模式：结果文件不存在，解析全部 %d 个文档",
+                                    len(all_docs))
+                        # 指定增量：只解析名单内文件（全部重新解析）
+                        if self.files:
+                            pending_paths = all_docs
+                    else:
+                        pending_paths = [
+                            path for path in all_docs
+                            if _student_id_of(path) not in recorded_ids
+                        ]
+                        skipped_existing_records = len(all_docs) - len(pending_paths)
+                        if skipped_existing_records:
+                            logger.info(
+                                "【阶段 doc】增量模式：跳过 %d 个结果文件中已有记录的文档，"
+                                "待解析 %d 个", skipped_existing_records, len(pending_paths))
                 else:
-                    pending_paths = [
-                        path for path in all_docs
-                        if _student_id_of(path) not in recorded_ids
-                    ]
-                    skipped_existing_records = len(all_docs) - len(pending_paths)
-                    if skipped_existing_records:
-                        logger.info(
-                            "【阶段 doc】增量模式：跳过 %d 个结果文件中已有记录的文档，"
-                            "待解析 %d 个", skipped_existing_records, len(pending_paths))
+                    # 指定全量：只解析名单内的文档，且全部重新解析
+                    pending_paths = all_docs
             logger.info("【阶段 doc】解析报告目录: %s（并发 %d）", reports_dir, parse_workers)
             reports = parse_all(
                 reports_dir,
@@ -573,7 +629,7 @@ class Grader(RunLogMixin):
         try:
             # 日志第一步：先记录配置信息（控制台同步输出），再加载与识图
             start_course, start_report_name = self._first_report_identity(
-                reports_dir, ".md")
+                reports_dir, ".md", self.files)
             self._append_stage_start_entry(
                 stage="pic",
                 course=start_course,
@@ -588,8 +644,8 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "增量模式": ("开启（仅识别 md 中无文字描述的图片）"
-                                 if self.incremental else "关闭"),
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             caption_template = cfg.prompts.image_context
@@ -607,7 +663,15 @@ class Grader(RunLogMixin):
                 on_error=_on_load_error, workers=parse_workers,
                 max_attempts=max_attempts, on_retry=_on_load_retry,
                 on_warning=lambda message: _record_event("警告", message))
+            # 指定文件（--files）：只保留名单内的报告，未命中的名字逐条告警
+            reports, unmatched_files = _select_reports(reports, self.files)
+            for name in unmatched_files:
+                _record_event("警告", f"指定的文件没有对应的 md 文件: {name}")
             if not reports:
+                if self.files:
+                    raise RuntimeError(
+                        "指定的文件没有对应的 md 文件（请先执行 doc 阶段）: "
+                        f"{reports_dir}\n指定文件：{'、'.join(self.files)}")
                 raise RuntimeError(f"目录中没有找到已保存的 md 文件: {reports_dir}")
 
             for report in reports:
@@ -982,7 +1046,7 @@ class Grader(RunLogMixin):
             hint = self._resolve_result_path_hint(template, reports_dir, output, tag_dep)
             # 日志第一步：先记录配置信息（控制台同步输出），再做占用检查与评分
             start_course, start_report_name = self._first_report_identity(
-                reports_dir, ".md")
+                reports_dir, ".md", self.files)
             self._append_stage_start_entry(
                 stage="sen",
                 course=start_course,
@@ -998,8 +1062,8 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "增量模式": ("开启（仅评分 LLM 项未评分的报告）"
-                                 if self.incremental else "关闭"),
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             self._ensure_result_writable(hint)
@@ -1016,6 +1080,16 @@ class Grader(RunLogMixin):
                 on_error=_on_load_error, workers=parse_workers,
                 max_attempts=max_attempts, stage="sen", on_retry=_on_load_retry,
                 on_warning=lambda message: _record_event("警告", message))
+
+            # 指定文件（--files）：只保留名单内的报告，未命中的名字逐条告警；
+            # 名单全部未命中时报错退出，避免“指定了文件却什么都没做”仍返回成功
+            reports, unmatched_files = _select_reports(reports, self.files)
+            for name in unmatched_files:
+                _record_event("警告", f"指定的文件没有对应的 md 文件: {name}")
+            if self.files and not reports:
+                raise RuntimeError(
+                    "指定的文件没有对应的 md 文件（请先执行 doc 阶段）: "
+                    f"{reports_dir}\n指定文件：{'、'.join(self.files)}")
 
             for report in reports:
                 # 之前加载失败的文档重试成功后，从失败计数中移除
@@ -1303,10 +1377,13 @@ class Grader(RunLogMixin):
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, stage: str = "full",
             skip_images: int = 2, tag_dep: str = "系部专业",
-            incremental: bool = False) -> Path | None:
+            incremental: bool = False,
+            files: list[str] | str | None = None) -> Path | None:
         cfg = self.config
         # 增量模式：显式传入 true/false（CLI 已解析为 bool）
         self.incremental = bool(incremental)
+        # 指定文件：非空时增量/全量只对名单内的文件有效；none/空值表示不过滤
+        self.files = normalize_file_names(files)
         # reports_dir 仅由启动参数提供，默认当前工作目录
         reports_dir = reports_dir or str(Path.cwd())
         # template 仅由启动参数提供，不能为空
