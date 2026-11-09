@@ -164,10 +164,14 @@ def save_parsed_batch(config: AppConfig, reports: list[ParsedReport], *,
 
 
 def save_parsed(reports: list[ParsedReport]) -> None:
-    """把解析出的 md 与图片落盘到与原文件相同路径。"""
+    """把解析出的 md 与图片落盘到与原文件相同路径。
+
+    先保存该文档的全部图片，图片全部写成功后再写 md：中途失败时不会留下
+    “md 已存在、图片不全”的产物，pic 阶段也不会基于不完整的产物继续处理。
+    """
     for report in reports:
         target_dir = Path(report.source_path).parent
-        (target_dir / f"{report.base_name}.md").write_text(report.md_text, encoding="utf-8")
         for image in report.images:
             (target_dir / f"{report.base_name}-P{image.index}.{image.ext}").write_bytes(image.data)
+        (target_dir / f"{report.base_name}.md").write_text(report.md_text, encoding="utf-8")
     logger.debug("解析产物（md/图片）已落盘 %d 份报告", len(reports))

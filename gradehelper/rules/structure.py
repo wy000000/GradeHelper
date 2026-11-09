@@ -76,53 +76,45 @@ def redundant_rname(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     return 0.0, "报告名称无冗余，不扣分。"
 
 
+# 独立标题行前缀：可选的章节编号、列表标记等
+SECTION_PREFIX = re.compile(
+    r"^(?:"
+    r"第[一二三四五六七八九十百\d]+[章节部分]?\s*[、.．,，:：]?\s*"
+    r"|[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
+    r"|\d+(?:\.\d+)*\s*[、.．,，:：)]?\s*"
+    r"|[（(][一二三四五六七八九十百\d]+[)）]\s*"
+    r"|[-*+·•]\s*"
+    r")"
+)
+CATALOGUE_LINE = re.compile(r"目录(?:[（(][^）)]*[)）])?[:：]?")
+REFERENCE_LINE = re.compile(
+    r"(?:参考文献|参考资料|references?|bibliography|workscited)"
+    r"(?:[（(][^）)]*[)）])?[:：]?",
+    re.IGNORECASE,
+)
+
+
 def has_catalogue(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """包含目录：报告前半部分存在“目录”标题且内容非空，或出现目录条目特征。"""
+    """包含目录：报告前半部分存在单独成段/成行的“目录”。
+
+    忽略行首尾及字符间的 1 个或多个空格（含全角空格），不要求标题或列表格式。
+    """
     text = report.md_text
-    first_half = text[: len(text) // 2]
-    lines = text.splitlines()
-    for index, raw_line in enumerate(first_half.splitlines()):
-        if not CATALOGUE_TITLE.match(_plain_text(raw_line)):
-            continue
-        if not _catalogue_section_has_content(lines, index, _heading_level(raw_line)):
-            return 0.0, "报告目录内容为空，不加分。"
-        score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"报告包含目录，+{score:g}分。"
-    if count_toc_lines(first_half) >= 3:
-        score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"报告包含目录，+{score:g}分。"
+    half = max(1, len(text) // 2)
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        if offset >= half:
+            break
+        if _is_catalogue_line(raw_line):
+            score = rule.default_numeric() or 0.0
+            return score, rule.comment or f"报告包含目录，+{score:g}分。"
+        offset += len(raw_line)
     return 0.0, "报告未检测到目录，不加分。"
 
 
-CATALOGUE_TITLE = re.compile(
-    r"^(?:"
-    r"第?[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
-    r"|\d+(?:\.\d+)*\s*[、.．,，:：)]?\s*"
-    r")?"
-    r"(?:目\s*录|table\s+of\s+contents|contents?)"
-    r"(?:\s*[（(][^）)]*[)）])?\s*[:：]?$",
-    re.IGNORECASE,
-)
-REFERENCE_TITLE = re.compile(
-    r"^(?:"
-    r"第?[一二三四五六七八九十百]+[章节部分]?\s*[、.．,，:：]?\s*"
-    r"|\d+(?:\.\d+)*\s*[、.．,，:：)]?\s*"
-    r")?"
-    r"(?:参考文献|参考资料|references?|bibliography|works\s+cited)"
-    r"(?:\s*[（(][^）)]*[)）])?\s*[:：]?$",
-    re.IGNORECASE,
-)
-MD_HEADING = re.compile(r"^(#{1,6})\s+\S")
-PIC_ONLY_LINE = re.compile(r"^\[\[PIC:[^\]]+\]\]$")
-HTML_COMMENT_ONLY = re.compile(r"^<!--.*-->$")
-RULE_SEPARATOR_LINES = {"---", "***", "___"}
-# 目录条目：标题文字 + 制表符/点线/连续空格 + 页码
-TOC_ENTRY = re.compile(r"^.{1,60}(?:\t+|\s{4,}|\.{3,}|…{1,2})\d{1,3}\s*$")
-
-
-def _heading_level(line: str) -> int | None:
-    match = MD_HEADING.match(line.strip())
-    return len(match.group(1)) if match else None
+def _is_catalogue_line(raw_line: str) -> bool:
+    """判断一行是否为单独的“目录”（忽略标题/列表标记、强调符和空白）。"""
+    return bool(CATALOGUE_LINE.fullmatch(_normalise_title_line(raw_line)))
 
 
 def _plain_text(line: str) -> str:
@@ -131,64 +123,27 @@ def _plain_text(line: str) -> str:
     return text.replace("*", "").replace("_", "").strip()
 
 
-def _section_has_content(lines: list[str], start: int,
-                         title_level: int | None) -> bool:
-    """章节标题后是否存在实质内容；遇同级或更高级标题即视为章节结束。"""
-    for line in lines[start + 1:]:
-        level = _heading_level(line)
-        if level is not None and (title_level is None or level <= title_level):
-            break
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if (PIC_ONLY_LINE.match(stripped) or HTML_COMMENT_ONLY.match(stripped)
-                or stripped in RULE_SEPARATOR_LINES):
-            continue
-        return True
-    return False
+def _normalise_title_line(raw_line: str) -> str:
+    """去掉标题/列表标记、强调符和所有空白，返回用于比对的行文本。"""
+    line = _plain_text(raw_line).strip("#")
+    line = SECTION_PREFIX.sub("", line)
+    line = line.replace("~", "").replace("`", "")
+    return re.sub(r"\s+", "", line)
 
 
-def _catalogue_section_has_content(lines: list[str], start: int,
-                                   title_level: int | None) -> bool:
-    """目录标题后是否存在目录条目。
-
-    普通文本标题（无 Markdown 级别）无法靠标题级别判断章节结束，因此把
-    非目录样式的标题视为正文开始；目录条目本身可能是 Markdown 标题。
-    """
-    for line in lines[start + 1:]:
-        level = _heading_level(line)
-        if level is not None:
-            if title_level is not None and level <= title_level:
-                break
-            if title_level is None and not TOC_ENTRY.match(_plain_text(line)):
-                break
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if (PIC_ONLY_LINE.match(stripped) or HTML_COMMENT_ONLY.match(stripped)
-                or stripped in RULE_SEPARATOR_LINES):
-            continue
-        return True
-    return False
+def _is_reference_line(raw_line: str) -> bool:
+    """判断一行是否为单独的“参考文献”（忽略标题/列表标记、强调符和空白）。"""
+    return bool(REFERENCE_LINE.fullmatch(_normalise_title_line(raw_line)))
 
 
 def has_reference(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """包含参考文献：存在“参考文献”章节标题且章节内容非空。"""
-    lines = report.md_text.splitlines()
-    found = False
-    for index, line in enumerate(lines):
-        if not REFERENCE_TITLE.match(_plain_text(line)):
-            continue
-        found = True
-        if not _section_has_content(lines, index, _heading_level(line)):
-            continue
-        score = rule.default_numeric() or 0.0
-        return score, rule.comment or f"报告包含参考文献，+{score:g}分。"
-    if found:
-        return 0.0, "报告参考文献章节为空，不加分。"
+    """包含参考文献：全文存在单独成段/成行的“参考文献”。
+
+    忽略行首尾及字符间的 1 个或多个空格（含全角空格），不要求标题或列表格式。
+    """
+    for line in report.md_text.splitlines():
+        if _is_reference_line(line):
+            score = rule.default_numeric() or 0.0
+            return score, rule.comment or f"报告包含参考文献，+{score:g}分。"
     return 0.0, "报告未检测到参考文献章节，不加分。"
 
-
-def count_toc_lines(text: str) -> int:
-    """统计目录样式行数：标题文字 + 点线/制表符/连续空格 + 阿拉伯页码。"""
-    return sum(1 for line in text.splitlines() if TOC_ENTRY.match(line.strip()))

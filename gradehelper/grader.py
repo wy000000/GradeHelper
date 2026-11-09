@@ -30,8 +30,8 @@ from .llm_grading import (
 )
 from .models import ItemScore, ParsedReport, ReportImage, RuleItem
 from .parser import (
-    embed_captions, parse_all, parse_filename, remove_skipped_placeholders,
-    strip_blank_lines,
+    embed_captions, has_image_caption, parse_all, parse_filename,
+    remove_skipped_placeholders, scan_reports, strip_blank_lines,
 )
 from .report_io import (
     load_one_report_for_pic, load_reports_for_pic, save_parsed, save_parsed_batch,
@@ -50,9 +50,25 @@ __all__ = [
 ]
 
 
+def _llm_item_scored(item: ItemScore | None) -> bool:
+    """LLM 评分项是否已有分数：结果表中该单元格为空即视为未评分。"""
+    return item is not None and item.score is not None
+
+
+def _report_needs_llm_grading(student_id: str,
+                              existing_scores: dict[str, dict[str, ItemScore]],
+                              llm_rules: list[RuleItem]) -> bool:
+    """只要有一项 LLM 评分项未评分，就需要对该报告重新评分。"""
+    row = existing_scores.get(student_id) or {}
+    return any(not _llm_item_scored(row.get(rule.key)) for rule in llm_rules)
+
+
 class Grader(RunLogMixin):
     def __init__(self, config: AppConfig):
         self.config = config
+        # 增量模式：doc 只解析结果文件中无记录的文档；pic 只识别缺描述的图片；
+        # sen 只评分 LLM 项未评分的报告。由启动参数 --incremental true/false 控制。
+        self.incremental = False
         self._init_run_log()
         # 全局取消令牌：Ctrl+C / 异常退出时关闭在飞 LLM 连接，让服务端停止生成
         self.cancel_token = CancelToken()
@@ -113,9 +129,13 @@ class Grader(RunLogMixin):
 
     def stage_doc(self, reports_dir: str | Path, template: str | Path,
                   skip_images: int = 2, tag_dep: str = "系部专业",
-                  output: str | Path | None = None) -> Path:
-        """阶段 doc：解析所有文档 + 程序化规则打分，写入独立结果文件的 result 表（LLM 项先写 0）。
+                  output: str | Path | None = None) -> Path | None:
+        """阶段 doc：解析文档 + 程序化规则打分，写入独立结果文件的 result 表。
 
+        doc 只更新 result 表中的 code 项，LLM 项的分数/置信度/评语保持原值（新行留空），
+        由 sen 阶段填写。执行顺序：解析文档 → 保存图片 → 保存 md → 写结果文件。
+        增量模式（self.incremental=True）只解析结果文件 result 表中没有对应学号记录的文档；
+        结果文件不存在时解析全部文档。
         运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
         与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
         """
@@ -133,6 +153,8 @@ class Grader(RunLogMixin):
         scoring_failed = 0
         image_total = 0
         image_kept = 0
+        # 增量模式下因结果文件已有记录而跳过的文档数
+        skipped_existing_records = 0
         warnings_log: list[str] = []
         claim: ResultFileClaim | None = None
         parse_workers = max(1, int(cfg.paths.parse_workers))
@@ -214,11 +236,51 @@ class Grader(RunLogMixin):
                     "并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
+                    "增量模式": ("开启（仅解析结果文件中无记录的文档）"
+                                 if self.incremental else "关闭"),
                 },
             )
             self._ensure_result_writable(hint)
             claim = ResultFileClaim(hint)
             claim.acquire()
+            # 增量 doc：以结果文件 result 表中的学号记录为准，只解析没有记录的文档；
+            # 结果文件不存在（首次运行）时解析全部文档。
+            pending_paths: list[Path] | None = None
+            all_docs: list[Path] = []
+
+            def _student_id_of(path: Path) -> str:
+                meta = parse_filename(
+                    path, name_format=cfg.paths.report_name_format,
+                    separator=cfg.paths.report_name_separator,
+                    suffixes=(path.suffix.lower(),))
+                return meta[2] if meta is not None else ""
+
+            if self.incremental:
+                try:
+                    all_docs = scan_reports(
+                        reports_dir,
+                        name_format=cfg.paths.report_name_format,
+                        separator=cfg.paths.report_name_separator,
+                        suffixes=tuple(cfg.paths.document_suffixes),
+                    )
+                except OSError:
+                    all_docs = []
+                recorded_ids: set[str] | None = None
+                if hint is not None and hint.is_file():
+                    recorded_ids = set(read_result_items(hint))
+                if recorded_ids is None:
+                    logger.info("【阶段 doc】增量模式：结果文件不存在，解析全部 %d 个文档",
+                                len(all_docs))
+                else:
+                    pending_paths = [
+                        path for path in all_docs
+                        if _student_id_of(path) not in recorded_ids
+                    ]
+                    skipped_existing_records = len(all_docs) - len(pending_paths)
+                    if skipped_existing_records:
+                        logger.info(
+                            "【阶段 doc】增量模式：跳过 %d 个结果文件中已有记录的文档，"
+                            "待解析 %d 个", skipped_existing_records, len(pending_paths))
             logger.info("【阶段 doc】解析报告目录: %s（并发 %d）", reports_dir, parse_workers)
             reports = parse_all(
                 reports_dir,
@@ -231,8 +293,16 @@ class Grader(RunLogMixin):
                 workers=parse_workers,
                 max_attempts=max_attempts,
                 on_retry=_on_parse_retry,
+                paths=pending_paths,
             )
             if not reports:
+                # 仅当确实有文档、且都因结果文件已有记录被跳过时才视为“增量无待办”；
+                # 目录为空或路径写错仍按原逻辑报错，避免静默成功
+                if (self.incremental and pending_paths is not None
+                        and all_docs and not pending_paths):
+                    logger.info("【阶段 doc】增量模式：所有文档均已记录，跳过解析与写表")
+                    result_path = hint
+                    return result_path
                 raise RuntimeError(f"目录中没有符合命名格式的报告: {reports_dir}")
 
             # 移除被 skip 的图片（不保存图片文件）及其占位符，保持剩余图片原始编号；
@@ -278,18 +348,13 @@ class Grader(RunLogMixin):
                 _record_event("警告", w)
                 logger.warning("  %s", w)
 
-            # LLM 项分数先写 0，sen 阶段再更新
-            llm_rule_keys = [r.key for r in rule_items if r.is_llm]
-            for sid_items in scores.values():
-                for key in llm_rule_keys:
-                    sid_items[key] = ItemScore(key=key, score=0.0, confidence=None, comment="")
-
-            # 写入独立结果文件的 result 表（按学号匹配：存在则更新，不存在则添加；不修改模板）
+            # 只写程序化（code）评分项；LLM 项由 sen 阶段填写，doc 不覆盖已有值
             result_path = self._resolve_result_path(template, reports, output)
             claim.retarget(result_path)  # 推断出的结果文件与预设路径不同时补占用
             write_results_atomic(result_path, reports, rule_items, scores,
-                                 mode="upsert", claim=claim)
-            logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（LLM 项已预置 0），耗时 %s",
+                                 mode="upsert", claim=claim, code_only=True)
+            logger.info("【阶段 doc】完成，程序化规则分数已写入 %s（仅更新 code 项，"
+                        "LLM 项保持不变），耗时 %s",
                         result_path, format_duration(time.perf_counter() - t0))
             return result_path
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
@@ -326,6 +391,8 @@ class Grader(RunLogMixin):
             extra["并发"] = f"{parse_workers} 线程"
             extra["图片"] = f"解析 {image_total} 张 / 保留 {image_kept} 张"
             extra["跳过图片"] = f"前 {skip_images} 张"
+            if self.incremental:
+                extra["增量跳过"] = f"{skipped_existing_records} 个结果文件中已有记录的文档"
             if result_path:
                 extra["结果文件"] = str(result_path)
             self._append_stage_log(self._build_stage_entry(
@@ -369,6 +436,9 @@ class Grader(RunLogMixin):
         caption_enabled = False
         caption_failed = 0
         load_failed = 0
+        # 增量模式：因 md 中已有描述而跳过的图片/报告数
+        skipped_caption_images = 0
+        skipped_caption_reports = 0
         warnings_log: list[str] = []
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
@@ -518,8 +588,18 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
+                    "增量模式": ("开启（仅识别 md 中无文字描述的图片）"
+                                 if self.incremental else "关闭"),
                 },
             )
+            caption_template = cfg.prompts.image_context
+            incremental_caption_ok = bool(
+                self.incremental and caption_template and "{caption}" in caption_template)
+            if self.incremental and not incremental_caption_ok:
+                _record_event(
+                    "警告",
+                    "增量模式无法识别已有图片描述（prompts.image_context 缺少 {caption}），"
+                    "将按全量识别")
             logger.info("【阶段 pic】从已保存的 md 与图片加载报告: %s（并发 %d）",
                         reports_dir, parse_workers)
             reports = self._load_reports_for_pic(
@@ -534,69 +614,91 @@ class Grader(RunLogMixin):
                 key = _report_key(report)
                 report_by_key[key] = report
                 base_md[key] = report.md_text
+                if incremental_caption_ok:
+                    before = len(report.images)
+                    report.images = [
+                        image for image in report.images
+                        if not has_image_caption(report.md_text, caption_template,
+                                                 image.index)
+                    ]
+                    skipped_caption_images += before - len(report.images)
+                    if before and not report.images:
+                        skipped_caption_reports += 1
                 for warning in report.warnings:
                     _record_event("警告",
                                   f"{Path(report.source_path).name}: {warning}")
+            if skipped_caption_images:
+                logger.info("【阶段 pic】增量模式：跳过 %d 张已有描述图片（%d 份报告），待识别 %d 张",
+                            skipped_caption_images, skipped_caption_reports,
+                            sum(len(report.images) for report in reports))
 
             llm_rules_flag = any(r.is_llm for r in read_rules(template))
+            pending_image_count = sum(len(report.images) for report in reports)
             if llm_rules_flag:
                 caption_enabled = True
-                logger.info("【阶段 pic】vllm 批量识别图片（每 %d 张实时回写）",
-                            max(1, cfg.vllm.batch_size))
-                try:
-                    caption_images(
-                        reports, cfg.vllm, cfg.prompts.image_prompt,
-                        cancel=self.cancel_token, on_error=_on_caption_error,
-                        on_batch=_on_caption_batch,
-                    )
-                except BaseException:
-                    # 先停掉在飞的生成，再保留已识别成功的描述
-                    self.cancel()
-                    for report in reports:
-                        _save_report(report)
-                    logger.warning("【阶段 pic】已中断，已保存 %d 张已识别图片描述",
-                                   len(saved_txt_keys))
-                    raise
-                _clear_resolved_caption_errors(reports)
+                if not pending_image_count:
+                    logger.info("【阶段 pic】%s",
+                                "增量模式：所有图片均已有描述，无需识别"
+                                if self.incremental else "没有需要识别的图片")
+                else:
+                    logger.info("【阶段 pic】vllm 批量识别图片（每 %d 张实时回写）",
+                                max(1, cfg.vllm.batch_size))
+                    try:
+                        caption_images(
+                            reports, cfg.vllm, cfg.prompts.image_prompt,
+                            cancel=self.cancel_token, on_error=_on_caption_error,
+                            on_batch=_on_caption_batch,
+                        )
+                    except BaseException:
+                        # 先停掉在飞的生成，再保留已识别成功的描述
+                        self.cancel()
+                        for report in reports:
+                            _save_report(report)
+                        logger.warning("【阶段 pic】已中断，已保存 %d 张已识别图片描述",
+                                       len(saved_txt_keys))
+                        raise
+                    _clear_resolved_caption_errors(reports)
 
-                # 整批完成后重试异常队列（只重试失败的 md 文件）。
-                # 进入重试轮：vllm 并发（batch_size）按配置值减半——只减一次，
-                # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
-                retry_vllm = replace(cfg.vllm,
-                                     batch_size=max(1, cfg.vllm.batch_size // 2))
-                for retry in range(1, max_attempts):
-                    pending_keys = _pending_keys()
-                    pending_reports = [report_by_key[key] for key in pending_keys
-                                       if key in report_by_key]
-                    if not pending_reports:
-                        break
-                    logger.warning(
-                        "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件"
-                        "（并发降为 %d，缺失图片重新识别后覆盖保存）",
-                        retry + 1, max_attempts, len(pending_reports),
-                        retry_vllm.batch_size)
-                    # 只把仍缺描述的图片交给 vllm，已成功的图片不重复识别
-                    missing_reports = [
-                        replace(report,
-                                images=[image for image in report.images if not image.caption])
-                        for report in pending_reports
-                        if any(not image.caption for image in report.images)
-                    ]
-                    if missing_reports:
-                        try:
-                            caption_images(
-                                missing_reports, retry_vllm, cfg.prompts.image_prompt,
-                                cancel=self.cancel_token, on_error=_on_caption_error,
-                            )
-                        except BaseException:
-                            self.cancel()
-                            for report in pending_reports:
-                                _save_report(report)
-                            raise
-                        _clear_resolved_caption_errors(pending_reports)
-                    # 保存失败（而非识别失败）的文件也在本轮重试写盘
-                    for report in pending_reports:
-                        _save_report(report)
+                    # 整批完成后重试异常队列（只重试失败的 md 文件）。
+                    # 进入重试轮：vllm 并发（batch_size）按配置值减半——只减一次，
+                    # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
+                    retry_vllm = replace(cfg.vllm,
+                                         batch_size=max(1, cfg.vllm.batch_size // 2))
+                    for retry in range(1, max_attempts):
+                        pending_keys = _pending_keys()
+                        pending_reports = [report_by_key[key] for key in pending_keys
+                                           if key in report_by_key]
+                        if not pending_reports:
+                            break
+                        logger.warning(
+                            "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件"
+                            "（并发降为 %d，缺失图片重新识别后覆盖保存）",
+                            retry + 1, max_attempts, len(pending_reports),
+                            retry_vllm.batch_size)
+                        # 只把仍缺描述的图片交给 vllm，已成功的图片不重复识别
+                        missing_reports = [
+                            replace(report,
+                                    images=[image for image in report.images
+                                            if not image.caption])
+                            for report in pending_reports
+                            if any(not image.caption for image in report.images)
+                        ]
+                        if missing_reports:
+                            try:
+                                caption_images(
+                                    missing_reports, retry_vllm,
+                                    cfg.prompts.image_prompt,
+                                    cancel=self.cancel_token, on_error=_on_caption_error,
+                                )
+                            except BaseException:
+                                self.cancel()
+                                for report in pending_reports:
+                                    _save_report(report)
+                                raise
+                            _clear_resolved_caption_errors(pending_reports)
+                        # 保存失败（而非识别失败）的文件也在本轮重试写盘
+                        for report in pending_reports:
+                            _save_report(report)
 
             caption_done = sum(1 for report in reports
                                for image in report.images if image.caption)
@@ -706,6 +808,9 @@ class Grader(RunLogMixin):
             if pending_count:
                 extra["异常队列"] = f"{pending_count} 项重试后仍失败"
             extra["跳过图片"] = f"前 {skip_images} 张"
+            if self.incremental:
+                extra["增量跳过"] = (f"{skipped_caption_images} 张已有描述图片"
+                                     f"（{skipped_caption_reports} 份报告）")
             if failed_documents:
                 extra["失败文档"] = "、".join(failed_documents)
             self._append_stage_log(self._build_stage_entry(
@@ -736,6 +841,7 @@ class Grader(RunLogMixin):
                   tag_dep: str = "系部专业") -> Path:
         """阶段 sen：llm 语义评分（单文件批量），写入独立结果文件的 result 表。
 
+        增量模式（self.incremental=True）只评分结果表中任一 LLM 项未评分的报告；
         运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
         与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
         """
@@ -772,6 +878,8 @@ class Grader(RunLogMixin):
         checkpoint_failures = 0
         # 无 LLM 评分项时分数不会变化，跳过结尾的冗余写表
         write_needed = True
+        # 增量模式：因 LLM 项均已评分而跳过的报告数
+        incremental_skipped = 0
 
         def _doc_name(report: ParsedReport) -> str:
             """失败文档的全名：本阶段实际处理的 md 文件名（课程-班级-学号-姓名-报告名.md）。"""
@@ -890,6 +998,8 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
+                    "增量模式": ("开启（仅评分 LLM 项未评分的报告）"
+                                 if self.incremental else "关闭"),
                 },
             )
             self._ensure_result_writable(hint)
@@ -958,6 +1068,23 @@ class Grader(RunLogMixin):
                         f"期望表头：{expected_header}\n"
                         f"现有表头：{existing_header}"
                     )
+
+                # 增量模式：只保留任一 LLM 项未评分的报告；全已评分的报告跳过
+                if self.incremental:
+                    pending_reports = [
+                        report for report in reports
+                        if _report_needs_llm_grading(
+                            report.student_id, existing_scores, llm_rules)
+                    ]
+                    incremental_skipped = len(reports) - len(pending_reports)
+                    if incremental_skipped:
+                        logger.info(
+                            "【阶段 sen】增量模式：跳过 %d 份 LLM 项已评分的报告，待评分 %d 份",
+                            incremental_skipped, len(pending_reports))
+                    reports = pending_reports
+                    if not reports:
+                        logger.info("【阶段 sen】增量模式：所有报告的 LLM 项均已评分，无需评分")
+                        return result_path
 
                 # 学号覆盖检查：sen 只更新 result 表中已有的行（strict 不新增行），
                 # 缺学号的报告必然在写表时失败，提前在这里报错退出，避免白跑一遍 LLM。
@@ -1104,6 +1231,8 @@ class Grader(RunLogMixin):
             if result_path:
                 extra["结果文件"] = str(result_path)
             extra["跳过图片"] = f"前 {skip_images} 张"
+            if self.incremental:
+                extra["增量跳过"] = f"{incremental_skipped} 份 LLM 项已评分报告"
             if checkpoint_failures:
                 extra["实时回写"] = f"失败 {checkpoint_failures} 次"
             entry = self._build_stage_entry(
@@ -1173,8 +1302,11 @@ class Grader(RunLogMixin):
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
             output: str | None = None, stage: str = "full",
-            skip_images: int = 2, tag_dep: str = "系部专业") -> Path | None:
+            skip_images: int = 2, tag_dep: str = "系部专业",
+            incremental: bool = False) -> Path | None:
         cfg = self.config
+        # 增量模式：显式传入 true/false（CLI 已解析为 bool）
+        self.incremental = bool(incremental)
         # reports_dir 仅由启动参数提供，默认当前工作目录
         reports_dir = reports_dir or str(Path.cwd())
         # template 仅由启动参数提供，不能为空

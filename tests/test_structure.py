@@ -169,10 +169,11 @@ class TestStructureRules(unittest.TestCase):
         md = "封面\n\n目录\n一、概述\t1\n二、分析\t3\n三、总结\t5\n\n## 正文\n正文"
         self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
 
-    def test_has_catalogue_toc_entries_without_heading(self):
+    def test_has_catalogue_without_title_not_counted(self):
+        # 只有目录条目、没有单独的“目录”行时不加分
         rule = make_rule("hasCatalogue", "2")
         md = "封面\n\n一、概述......1\n二、分析......3\n三、总结......5\n\n" + "正文" * 50
-        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 0.0)
 
     def test_has_catalogue_plain_title_heading_entries(self):
         rule = make_rule("hasCatalogue", "2")
@@ -181,12 +182,35 @@ class TestStructureRules(unittest.TestCase):
               "## 一、事件概述\n正文")
         self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
 
-    def test_has_catalogue_empty_section(self):
+    def test_has_catalogue_title_alone_counts(self):
+        # “目录”单独成行即可，不要求下面有目录内容
         rule = make_rule("hasCatalogue", "2")
         for md in ("# 报告\n\n## 目录\n\n## 正文\n正文内容",
                    "# 报告\n\n目录\n\n## 正文\n正文内容",
                    "封面\n\n## 目录\n"):
+            self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0, msg=md)
+
+    def test_has_catalogue_ignores_spaces_and_format(self):
+        rule = make_rule("hasCatalogue", "2")
+        for md in ("封面\n\n- 目录\n正文",
+                   "封面\n\n**目录**\n正文",
+                   "封面\n\n目录：\n正文",
+                   "封面\n\n目录（Contents）\n正文",
+                   "封面\n\n一、目 录\n正文",
+                   "封面\n\n1. 目\u3000录\n正文",
+                   "封面\n\n  目  录 \n正文",
+                   "封面\n\n\u3000目\u3000\u3000录\u3000\n正文"):
+            self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0, msg=md)
+
+    def test_has_catalogue_requires_standalone_line(self):
+        rule = make_rule("hasCatalogue", "2")
+        for md in ("本报告目录如下\n正文", "目录结构如下\n正文"):
             self.assertEqual(has_catalogue(make_report(md), rule)[0], 0.0, msg=md)
+
+    def test_has_catalogue_second_half_not_counted(self):
+        rule = make_rule("hasCatalogue", "2")
+        md = "正文" * 200 + "\n目录\n" + "正文" * 100
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 0.0)
 
     def test_has_reference(self):
         rule = make_rule("hasReference", "2")
@@ -206,11 +230,33 @@ class TestStructureRules(unittest.TestCase):
             self.assertEqual(has_reference(make_report(md), rule)[0], expected,
                              msg=f"默认值 {default}")
 
-    def test_has_reference_empty_section(self):
+    def test_has_reference_title_alone_counts(self):
+        # “参考文献”单独成行即可，不要求下面有内容
         rule = make_rule("hasReference", "2")
         for md in ("正文\n\n## 参考文献", "正文\n\n## 参考文献\n\n",
                    "正文\n\n## 参考文献\n\n## 附录\n附录内容",
                    "正文\n\n参考文献：\n\n"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+
+    def test_has_reference_ignores_spaces_and_format(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("正文\n\n- 参考文献\n[1] 文献一",
+                   "正文\n\n**参考文献**\n[1] 文献一",
+                   "正文\n\n一、参 考 文 献\n[1] 文献一",
+                   "正文\n\n1. 参\u3000考\u3000文\u3000献\n[1] 文献一",
+                   "正文\n\n  参  考  文  献 \n[1] 文献一",
+                   "正文\n\n\u3000参\u3000\u3000考\u3000文\u3000\u3000献\u3000\n[1] 文献一"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+
+    def test_has_reference_anywhere_in_text(self):
+        # 全文任意位置出现“参考文献”行都算
+        rule = make_rule("hasReference", "2")
+        md = "正文" * 200 + "\n参考文献\n" + "正文" * 100
+        self.assertEqual(has_reference(make_report(md), rule)[0], 2.0)
+
+    def test_has_reference_requires_standalone_line(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("参考文献如下\n[1] 文献一", "参考文献......12\n正文"):
             self.assertEqual(has_reference(make_report(md), rule)[0], 0.0, msg=md)
 
     def test_has_reference_absent(self):

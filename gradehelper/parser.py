@@ -329,11 +329,14 @@ def parse_all(
     workers: int = 1,
     max_attempts: int = 2,
     on_retry: Callable[[Path, Exception, int], None] | None = None,
+    paths: list[Path] | None = None,
 ) -> list[ParsedReport]:
     """扫描并多线程解析目录下所有合规报告，解析结果全部驻留内存。
 
     suffixes 决定扫描哪些文档后缀（默认 .docx / .doc / .pdf）；
     mineru_tier 决定 PDF/图片的解析档位（办公文档固定使用 MinerU 的 flash 原生解析）。
+    paths 非 None 时只解析这些文件（doc 增量模式已按结果文件记录筛选过），
+    为 None 时扫描 reports_dir。
 
     - 单份文档解析失败不会中断其它文档；
     - 失败文件进入异常队列，全部解析完成后自动重试；
@@ -343,8 +346,9 @@ def parse_all(
     ``on_error`` 只在重试结束后对最终仍失败的文档调用一次，
     因此不会因重试产生重复的失败记录。
     """
-    paths = scan_reports(reports_dir, name_format=name_format, separator=separator,
-                         suffixes=suffixes)
+    targets = (list(paths) if paths is not None
+               else scan_reports(reports_dir, name_format=name_format,
+                                 separator=separator, suffixes=suffixes))
 
     def _on_final_failure(failed) -> None:
         logger.error("解析失败 %s: %s", failed.path.name, failed.reason)
@@ -364,7 +368,7 @@ def parse_all(
     with _quiet_mineru_logs():
         outcome = run_file_batch(
             stage="doc",
-            items=paths,
+            items=targets,
             worker=lambda path: parse_report(
                 path, name_format=name_format, separator=separator, tag_dep=tag_dep,
                 suffixes=suffixes, mineru_tier=mineru_tier),
@@ -404,6 +408,13 @@ def _caption_block_span(md: str, template: str, index: int) -> tuple[int, int] |
                     end += 1
                 return start, end
     return None
+
+
+def has_image_caption(md_text: str, template: str, index: int) -> bool:
+    """md 中该编号图片是否已有 text 描述块（增量 pic 阶段据此跳过）。"""
+    if not template or "{caption}" not in template:
+        return False
+    return _caption_block_span(md_text, template, index) is not None
 
 
 def embed_captions(md_text: str, images: list[ReportImage], template: str,

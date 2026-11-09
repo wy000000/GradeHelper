@@ -25,6 +25,15 @@ else:
     from .progress import install_logging_bridge
 
 
+def _parse_bool(value: str) -> bool:
+    """解析显式布尔参数：只接受 true / false（不区分大小写）。"""
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    raise argparse.ArgumentTypeError("--incremental 只接受 true 或 false")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gradehelper",
@@ -36,9 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
     # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
     stage = "doc"
-    # stage = "pic"
-    # stage = "sen"
-    # stage = "full"
+    stage = "pic"
+    stage = "sen"
+    stage = "full"
+    incremental = False
+    # incremental = True
     skip_images = 2
     
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
@@ -56,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-images", type=int, default=skip_images, help="解析时跳过前面 N 张图片（默认 2）")
     parser.add_argument("--stage", choices=["doc", "pic", "sen", "full"], default=stage,
                         help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，sen=llm语义评分，full=全部（默认）")
+    parser.add_argument("--incremental", type=_parse_bool, default=incremental,
+                        metavar="true|false",
+                        help="增量模式：true=开启，false=关闭（默认 false）。"
+                             "doc 只解析结果文件中无记录的文档；pic 只识别无文字描述的图片；"
+                             "sen 只评分 LLM 项未评分的报告")
     return parser
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             stage=args.stage,
             skip_images=args.skip_images,
             tag_dep=args.tagDep,
+            incremental=args.incremental,
         )
     except KeyboardInterrupt:
         # 已完成的结果已由阶段逻辑保存；这里兜底关闭仍在飞的连接

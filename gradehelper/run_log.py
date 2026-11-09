@@ -277,7 +277,6 @@ class RunLogMixin:
         lines = [
             _SEP_EQ,
             _LOG_TITLE,
-            _SEP_EQ,
         ]
         self._append_log("\n".join(lines) + "\n")
         logger.info("%s", "\n".join(lines))

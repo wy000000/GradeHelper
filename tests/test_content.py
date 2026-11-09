@@ -33,7 +33,7 @@ REQUIREMENT_MD = (
 REQUIREMENT_EVALUATION = (
     "包含题目。报告前半部分包含相似度不少于90%的下面字符串。“1、针对某一云安全问题进行论述，"
     "叙述其产生的原因，带来的危害，解决的方法。\\n2、对本门课程的总结，包括收益、建议等。”"
-    "如果不包含，-3。"
+    "如果不包含扣分。"
 )
 
 
@@ -61,6 +61,21 @@ class TestHasRequirement(unittest.TestCase):
 
     def test_missing(self):
         self.assertEqual(has_requirement(make_report("完全无关的正文"), self.rule)[0], -3.0)
+
+    def test_ignores_full_and_half_width_punctuation_and_spaces(self):
+        # 正文使用半角标点/全角空格，题目要求使用全角标点，归一化后应完全一致
+        md = (
+            "前言\n"
+            "1,\u3000针对某一云安全问题进行论述, 叙述其产生的原因, 带来的危害, 解决的方法.\n"
+            "2, 对本门课程的总结, 包括收益, 建议等.\n"
+            "正文"
+        )
+        self.assertEqual(has_requirement(make_report(md), self.rule)[0], 0.0)
+
+    def test_second_half_not_matched(self):
+        # 题目要求只出现在正文后半段，不再通过
+        md = "无关正文" * 100 + REQUIREMENT_MD
+        self.assertEqual(has_requirement(make_report(md), self.rule)[0], -3.0)
 
     def test_window_similarity(self):
         self.assertTrue(window_similarity("前面有一些字然后题目要求原文在此处后面还有一些字",

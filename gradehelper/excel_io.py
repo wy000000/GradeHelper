@@ -134,7 +134,8 @@ def build_expected_headers(rules: list[RuleItem]) -> list[str]:
 def build_results_workbook(source_path: str | Path,
                            reports: list[ParsedReport], rules: list[RuleItem],
                            scores: dict[str, dict[str, ItemScore]],
-                           mode: str = "upsert") -> Workbook:
+                           mode: str = "upsert",
+                           code_only: bool = False) -> Workbook:
     """基于 source_path 构建写入评分后的工作簿（不落盘）。
 
     源文件不存在时新建工作簿；存在时加载以保留既有行供 upsert/strict 匹配。
@@ -144,6 +145,9 @@ def build_results_workbook(source_path: str | Path,
     mode:
       - "upsert":  按学号匹配，存在则更新该行，不存在则追加新行；保留其余旧行
       - "strict":  按学号匹配更新，不存在则抛出 RuntimeError 退出程序；保留其余旧行
+
+    code_only=True 时只写程序化（code）评分项的评分/评语列，LLM 评分、置信度、
+    评语列保持原值（新行留空），供 doc 阶段使用。
     """
     out = Path(source_path)
     if out.is_file():
@@ -177,6 +181,8 @@ def build_results_workbook(source_path: str | Path,
         ws.cell(row=row_idx, column=3, value=report.klass)
         ws.cell(row=row_idx, column=4, value=formula)
         for i, rule in enumerate(rules):
+            if code_only and rule.is_llm:
+                continue  # LLM 评分/置信度/评语列保持原值
             score_col = score_columns[i]
             item = row_scores.get(rule.key)
             ws.cell(row=row_idx, column=score_col,
@@ -238,10 +244,11 @@ def build_results_workbook(source_path: str | Path,
 def write_results(output_path: str | Path,
                   reports: list[ParsedReport], rules: list[RuleItem],
                   scores: dict[str, dict[str, ItemScore]],
-                  mode: str = "upsert") -> Path:
+                  mode: str = "upsert",
+                  code_only: bool = False) -> Path:
     """把评分结果就地写入独立结果文件的 result 表（不修改评分模板文件）。"""
     out = Path(output_path)
-    wb = build_results_workbook(out, reports, rules, scores, mode)
+    wb = build_results_workbook(out, reports, rules, scores, mode, code_only=code_only)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
@@ -253,7 +260,8 @@ def write_results_atomic(output_path: str | Path,
                          scores: dict[str, dict[str, ItemScore]],
                          mode: str = "upsert",
                          claim: ResultFileClaim | None = None,
-                         retries: int = 6, retry_delay: float = 1.0) -> Path:
+                         retries: int = 6, retry_delay: float = 1.0,
+                         code_only: bool = False) -> Path:
     """写结果表：先写同目录临时文件再原子替换，目标被占用时重试且不损坏原文件。
 
     与 write_results 的区别只在落盘方式：内容先完整写到
@@ -262,6 +270,8 @@ def write_results_atomic(output_path: str | Path,
     claim、替换后重新占用（claim 见 file_claim.ResultFileClaim，用于 doc/sen 阶段
     运行期间独占结果文件）。重试用尽仍失败时：原结果文件保持不变，新结果完整
     保留在临时文件中，异常信息会给出该路径，关闭 Excel 后可改名取用或重新运行。
+
+    code_only 语义见 build_results_workbook（doc 阶段只更新 code 项）。
     """
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -272,7 +282,8 @@ def write_results_atomic(output_path: str | Path,
         released = False
         try:
             # 先完整构建并写临时文件（不与任何程序冲突），再替换目标文件
-            wb = build_results_workbook(out, reports, rules, scores, mode)
+            wb = build_results_workbook(out, reports, rules, scores, mode,
+                                        code_only=code_only)
             wb.save(tmp)
             if claim is not None and claim.held:
                 claim.release()  # 替换目标文件需要独占，Windows 上被占用会拒绝

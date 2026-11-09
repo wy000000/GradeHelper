@@ -12,9 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper import batch as batch_module  # noqa: E402
 from gradehelper.config import AppConfig, PathsConfig  # noqa: E402
+from gradehelper.excel_io import read_result_items, write_results  # noqa: E402
 from gradehelper.grader import Grader  # noqa: E402
 from gradehelper.models import ItemScore, ParsedReport, ReportImage, RuleItem  # noqa: E402
 from gradehelper.parser import remove_skipped_placeholders, strip_blank_lines  # noqa: E402
+from gradehelper.report_io import save_parsed  # noqa: E402
 
 BASE = "云安全-安全2401-2021001-张三-课程报告"
 
@@ -232,6 +234,139 @@ class TestStageDocRecordsParseWarnings(unittest.TestCase):
 
         entry = grader.stage_logs[-1]
         self.assertTrue(any("MinerU 解析失败" in w for w in entry.warnings))
+
+
+class TestSaveParsedOrdering(unittest.TestCase):
+    """doc 解析产物落盘顺序：先图片、全部成功后写 md。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _report(self) -> ParsedReport:
+        return ParsedReport(
+            course="云安全", klass="安全2401", student_id="2021001", std_name="张三",
+            report_name="课程报告", source_path=str(self.tmp / f"{BASE}.docx"),
+            md_text="正文\n",
+            images=[ReportImage(index=3, ext="png", data=b"a"),
+                    ReportImage(index=4, ext="png", data=b"b")],
+        )
+
+    def test_all_images_are_written_before_md(self):
+        report = self._report()
+        calls: list[str] = []
+        real_write_bytes = Path.write_bytes
+        real_write_text = Path.write_text
+
+        def fake_write_bytes(path, data, *args, **kwargs):
+            calls.append("image")
+            return real_write_bytes(path, data)
+
+        def fake_write_text(path, text, *args, **kwargs):
+            calls.append("md")
+            return real_write_text(path, text, *args, **kwargs)
+
+        with patch.object(Path, "write_bytes", fake_write_bytes), \
+                patch.object(Path, "write_text", fake_write_text):
+            save_parsed([report])
+
+        self.assertEqual(calls, ["image", "image", "md"])
+        self.assertTrue((self.tmp / f"{BASE}.md").is_file())
+
+    def test_image_write_failure_leaves_no_md(self):
+        report = self._report()
+        # 用同名目录占住图片路径，使写图片必然失败
+        (self.tmp / f"{BASE}-P3.png").mkdir()
+
+        with self.assertRaises(OSError):
+            save_parsed([report])
+
+        self.assertFalse((self.tmp / f"{BASE}.md").exists())
+
+
+def _rules_with_llm() -> list[RuleItem]:
+    return [
+        RuleItem(key="baseScore", default="25", weight=1.0, method="code",
+                 evaluation="", comment="报告已提交，+25分"),
+        RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
+                 evaluation="事件描述", comment=""),
+        RuleItem(key="eventCause", default="0-15", weight=0.15, method="LLM",
+                 evaluation="原因分析", comment=""),
+    ]
+
+
+class TestStageDocOnlyCodeItems(unittest.TestCase):
+    """doc 阶段只更新 result 表中的 code 项，LLM 项保持原值/新行留空。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.template = self.tmp / "template.xlsx"
+        self.result_path = self.tmp / "result.xlsx"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _report(self, sid: str) -> ParsedReport:
+        return ParsedReport(
+            course="云安全", klass="安全2401", student_id=sid, std_name="张三",
+            report_name="课程报告",
+            source_path=str(self.tmp / f"云安全-安全2401-{sid}-张三-课程报告.docx"),
+            md_text="正文\n",
+        )
+
+    def _run_doc(self, report: ParsedReport, rules: list[RuleItem],
+                 scores: dict[str, dict[str, ItemScore]]) -> None:
+        with patch("gradehelper.grader.parse_all", return_value=[report]), \
+                patch("gradehelper.grader.read_rules", return_value=rules), \
+                patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
+            _grader().stage_doc(self.tmp, self.template, skip_images=0,
+                                output=self.result_path)
+
+    def test_existing_llm_scores_are_preserved(self):
+        rules = _rules_with_llm()
+        report = self._report("2021001")
+        write_results(self.result_path, [report], rules, {
+            "2021001": {
+                "baseScore": ItemScore(key="baseScore", score=20.0, comment="旧评语"),
+                "event": ItemScore(key="event", score=12.0, confidence=0.9,
+                                   comment="LLM 评语"),
+                "eventCause": ItemScore(key="eventCause", score=7.0, confidence=0.8,
+                                        comment="LLM 原因"),
+            }
+        }, mode="upsert")
+
+        self._run_doc(report, rules, {
+            "2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
+                                               comment="新评语")},
+        })
+
+        items = read_result_items(self.result_path)["2021001"]
+        self.assertEqual(items["baseScore"].score, 25.0)
+        self.assertEqual(items["baseScore"].comment, "新评语")
+        # LLM 项的分数/置信度/评语完全保持原值
+        self.assertEqual(items["event"].score, 12.0)
+        self.assertEqual(items["event"].confidence, 0.9)
+        self.assertEqual(items["event"].comment, "LLM 评语")
+        self.assertEqual(items["eventCause"].score, 7.0)
+        self.assertEqual(items["eventCause"].comment, "LLM 原因")
+
+    def test_new_row_leaves_llm_cells_blank(self):
+        rules = _rules_with_llm()
+        report = self._report("2021002")
+
+        self._run_doc(report, rules, {
+            "2021002": {"baseScore": ItemScore(key="baseScore", score=25.0,
+                                               comment="新评语")},
+        })
+
+        items = read_result_items(self.result_path)["2021002"]
+        self.assertEqual(items["baseScore"].score, 25.0)
+        self.assertIsNone(items["event"].score)
+        self.assertIsNone(items["eventCause"].score)
 
 
 if __name__ == "__main__":

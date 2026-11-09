@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import unicodedata
 
 from ..models import ParsedReport, RuleItem
 
@@ -27,6 +28,14 @@ def is_list_line(line: str) -> bool:
     return bool(LIST_LINE.match(line))
 
 
+def _normalize_for_match(text: str) -> str:
+    """移除空白与 Unicode 标点（含全角/半角），用于忽略格式差异比较。"""
+    return "".join(
+        ch for ch in text
+        if not ch.isspace() and not unicodedata.category(ch).startswith("P")
+    )
+
+
 def too_many_list(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     """List 滥用：非代码 List 内容长度超过非代码正文段落内容长度则扣分。"""
     body = strip_code(report.md_text)
@@ -48,19 +57,16 @@ def too_many_list(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
 
 
 def has_requirement(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """包含题目：报告前半部分需包含与题目要求相似度 >=90% 的文本。
-
-    “前半部分”按文本起始位置判断：匹配窗口的起点须落在全文前 50%。
-    """
+    """包含题目：报告前半部分需包含与题目要求相似度 >=90% 的文本。"""
     text = strip_code(report.md_text)
-    requirement = report_requirement(rule, text)
+    requirement = report_requirement(rule)
     if window_similarity(text, requirement, threshold=0.9, max_start_ratio=0.5):
         return 0.0, "报告前半部分包含题目要求原文，不扣分。"
     penalty = rule.default_numeric() or 0.0
     return penalty, rule.comment or f"未按要求写明题目要求，{penalty:+g}分。"
 
 
-def report_requirement(rule: RuleItem, _first_half: str) -> str:
+def report_requirement(rule: RuleItem) -> str:
     """从 rule 的评估方法中提取题目要求文本；提取失败用内置默认。"""
     text = rule.evaluation
     match = re.search(r"[“\"](.+?)[”\"]", text, re.DOTALL)
@@ -70,23 +76,26 @@ def report_requirement(rule: RuleItem, _first_half: str) -> str:
 
 
 def window_similarity(text: str, pattern: str, threshold: float = 0.9,
-                      max_start_ratio: float = 0.5) -> bool:
+                      max_start_ratio: float = 1.0) -> bool:
     """text 中是否存在长度相近的滑动窗口，与 pattern 的相似度 >= threshold。
 
-    max_start_ratio 限定窗口起点须落在文本前该比例内（用于“报告前半部分”语义）。
+    比较前忽略空白与 Unicode 标点（含全角/半角），避免格式差异影响结果。
+    max_start_ratio 限定窗口起点须落在文本前该比例内；1.0（默认）表示扫描全文。
     逐位置精确扫描（用 quick_ratio 预筛保证性能），避免固定步长网格因文本长度整体
     平移（例如 doc 阶段去除空行、移除跳过图片的占位符）而漏掉实际存在的匹配窗口。
     """
-    pat = re.sub(r"\s+", "", pattern)
+    pat = _normalize_for_match(pattern)
     if not pat:
         return False
-    compact = re.sub(r"\s+", "", text)
-    if pat in compact:
-        return True
+    compact = _normalize_for_match(text)
     n, m = len(compact), len(pat)
     if n <= m:
         return difflib.SequenceMatcher(None, compact, pat).ratio() >= threshold
     max_start = max(0, int(n * max_start_ratio))
+    # 精确子串也须满足起点限制，否则后半段的完全命中会绕过“前半部分”
+    hit = compact.find(pat)
+    if 0 <= hit <= max_start:
+        return True
     limit = min(n - m + 1, max_start + 1)
     for start in range(limit):
         matcher = difflib.SequenceMatcher(None, compact[start:start + m], pat)
