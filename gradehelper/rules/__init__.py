@@ -23,11 +23,15 @@ from .structure import (
     has_name_id,
     has_reference,
     redundant_rname,
+    std_doc,
+    use_template,
 )
 
 # 单报告规则：评分项名 -> handler(report, rule) -> (score, comment)
 RULE_HANDLERS: dict[str, Callable[[ParsedReport, RuleItem], tuple[float, str]]] = {
     "baseScore": base_score,
+    "stdDoc": std_doc,
+    "useTmpl": use_template,
     "hasNameID": has_name_id,
     "redundantRName": redundant_rname,
     "tooManyList": too_many_list,

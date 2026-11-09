@@ -48,7 +48,7 @@ def read_rules(template_path: str | Path) -> list[RuleItem]:
             key=str(key).strip(),
             default=str(ws.cell(row=row, column=header["默认值"]).value or "").strip(),
             weight=float(weight) if isinstance(weight, (int, float)) else 1.0,
-            method=str(ws.cell(row=row, column=header["处理方法"]).value or "rule").strip(),
+            method=str(ws.cell(row=row, column=header["处理方法"]).value or "code").strip(),
             evaluation=str(ws.cell(row=row, column=header["评估方法"]).value or "").strip(),
             comment=str(ws.cell(row=row, column=header["评语"]).value or "").strip(),
         ))
@@ -296,4 +296,3 @@ def write_results_atomic(output_path: str | Path,
         ) from last_exc
     logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
     return out
-

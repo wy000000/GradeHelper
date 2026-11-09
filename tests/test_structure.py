@@ -16,6 +16,8 @@ from gradehelper.rules.structure import (  # noqa: E402
     has_name_id,
     has_reference,
     redundant_rname,
+    std_doc,
+    use_template,
 )
 
 
@@ -26,7 +28,7 @@ def make_report(md: str, sid: str = "2024001", name: str = "张三",
                         source_path="dummy.docx", md_text=md)
 
 
-def make_rule(key: str, default: str, method: str = "rule",
+def make_rule(key: str, default: str, method: str = "code",
               evaluation: str = "", comment: str = "") -> RuleItem:
     return RuleItem(key=key, default=default, weight=1.0, method=method,
                     evaluation=evaluation, comment=comment)
@@ -90,6 +92,58 @@ class TestScanReports(unittest.TestCase):
 
 
 class TestStructureRules(unittest.TestCase):
+    def test_std_doc(self):
+        rule = make_rule("stdDoc", "-2",
+                         comment="报告未按要求的.docx格式提交，扣分。")
+        self.assertEqual(std_doc(make_report("正文"), rule)[0], 0.0)
+        for suffix in (".doc", ".pdf", ".txt"):
+            report = make_report("正文")
+            report.source_path = f"dummy{suffix}"
+            score, comment = std_doc(report, rule)
+            self.assertEqual(score, -2.0, msg=suffix)
+            self.assertEqual(comment, rule.comment, msg=suffix)
+
+    def test_std_doc_case_insensitive_suffix(self):
+        rule = make_rule("stdDoc", "-2")
+        report = make_report("正文")
+        report.source_path = "dummy.DOCX"
+        self.assertEqual(std_doc(report, rule)[0], 0.0)
+
+    def test_use_template(self):
+        rule = make_rule("useTmpl", "-2", comment="报告未使用指定模板，扣分。")
+        ok_texts = (
+            "J I A N G S U    U N I V E R S I T Y\n学号：2024001\n姓名：张三",
+            "jiangsu university\n学号 2024001",
+            "J\tI\tA\tN\tG\tS\tU\nU N I V E R S I T Y\n2024001",
+        )
+        for text in ok_texts:
+            score, comment = use_template(make_report(text), rule)
+            self.assertEqual(score, 0.0, msg=text)
+            self.assertNotEqual(comment, rule.comment, msg=text)
+
+        bad_texts = (
+            "江苏大学\n学号：2024001\n姓名：张三",          # 学校名缺失
+            "2024001\nJ I A N G S U U N I V E R S I T Y",  # 学校名在学号之后
+            "J I A N G S U\n2024001",                       # 学校名不完整
+        )
+        for text in bad_texts:
+            score, comment = use_template(make_report(text), rule)
+            self.assertEqual(score, -2.0, msg=text)
+            self.assertEqual(comment, rule.comment, msg=text)
+
+    def test_use_template_uses_real_student_id_not_label(self):
+        rule = make_rule("useTmpl", "-2", comment="报告未使用指定模板，扣分。")
+        # “学号”二字出现在学校名之前不算数，必须看真实学号的位置
+        text = "学号：\nJ I A N G S U    U N I V E R S I T Y\n2024001"
+        self.assertEqual(use_template(make_report(text), rule)[0], 0.0)
+
+    def test_use_template_missing_student_id(self):
+        rule = make_rule("useTmpl", "-2", comment="报告未使用指定模板，扣分。")
+        text = "J I A N G S U    U N I V E R S I T Y\n姓名：张三"
+        score, comment = use_template(make_report(text), rule)
+        self.assertEqual(score, -2.0)
+        self.assertEqual(comment, rule.comment)
+
     def test_has_name_id(self):
         rule = make_rule("hasNameID", "-2")
         ok = make_report("学号 2024001 张三 的报告")

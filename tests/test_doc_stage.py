@@ -101,7 +101,7 @@ class TestStageDocCleansMd(unittest.TestCase):
             md_text=md,
             images=[ReportImage(index=i, ext="png", data=b"") for i in (1, 2, 3)],
         )
-        rule = RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+        rule = RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                         evaluation="", comment="报告已提交，+25分")
         scores = {"2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
                                                     comment="报告已提交，+25分")}}
@@ -219,7 +219,7 @@ class TestStageDocRecordsParseWarnings(unittest.TestCase):
             report_name="课程报告", source_path=str(self.tmp / f"{BASE}.docx"),
             md_text="正文\n", warnings=["MinerU 解析失败: boom"],
         )
-        rule = RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+        rule = RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                         evaluation="", comment="报告已提交，+25分")
         scores = {"2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
                                                     comment="报告已提交，+25分")}}

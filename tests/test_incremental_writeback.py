@@ -38,7 +38,7 @@ def _config(batch: int = 2) -> AppConfig:
 
 def _rules() -> list[RuleItem]:
     return [
-        RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+        RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                  evaluation="", comment="报告已提交，+25分"),
         RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
                  evaluation="事件描述", comment=""),
@@ -467,4 +467,3 @@ class TestSenCheckpointRetry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

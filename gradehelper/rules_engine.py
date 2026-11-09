@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def run_program_rules(reports: list[ParsedReport], rule_items: list[RuleItem],
                       ) -> tuple[dict[str, dict[str, ItemScore]], list[str]]:
-    """执行所有『处理方法=rule』的程序化评分项。
+    """执行所有『处理方法=code』的程序化评分项。
 
     返回 (scores: 学号->评分项->ItemScore, warnings)。
     """
@@ -24,13 +24,15 @@ def run_program_rules(reports: list[ParsedReport], rule_items: list[RuleItem],
     scores: dict[str, dict[str, ItemScore]] = {r.student_id: {} for r in reports}
     warnings: list[str] = []
 
+    missing = [rule.key for rule in program_rules if rules_pkg.resolve(rule) is None]
+    if missing:
+        msg = (f"以下评分项处理方法为 code，但没有注册对应的程序实现: "
+               f"{', '.join(missing)}")
+        logger.error(msg)
+        raise ValueError(msg)
+
     for rule in program_rules:                      # 外层：单个 rule 项
         kind = rules_pkg.resolve(rule)
-        if kind is None:
-            msg = f"评分项 '{rule.key}' 处理方法为 rule，但没有注册对应的程序实现，已跳过"
-            logger.warning(msg)
-            warnings.append(msg)
-            continue
 
         if kind == "batch":                          # 跨报告批处理（如 copied）
             try:

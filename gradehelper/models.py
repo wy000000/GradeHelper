@@ -13,7 +13,7 @@ class RuleItem:
     key: str                      # 评分项
     default: str                  # 默认值（原始字符串，如 "25"、"0-15"）
     weight: float                 # 权重
-    method: str                   # 处理方法：'rule'（程序化）或 'LLM'
+    method: str                   # 处理方法：'code'（程序化）或 'LLM'
     evaluation: str               # 评估方法描述
     comment: str                  # 评语模板
 

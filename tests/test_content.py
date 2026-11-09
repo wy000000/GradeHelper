@@ -21,7 +21,7 @@ def make_report(md: str) -> ParsedReport:
 
 
 def make_rule(key: str, default: str) -> RuleItem:
-    return RuleItem(key=key, default=default, weight=1.0, method="rule", evaluation="", comment="")
+    return RuleItem(key=key, default=default, weight=1.0, method="code", evaluation="", comment="")
 
 
 REQUIREMENT_MD = (
@@ -53,7 +53,7 @@ class TestTooManyList(unittest.TestCase):
 
 class TestHasRequirement(unittest.TestCase):
     def setUp(self):
-        self.rule = RuleItem(key="hasRequirement", default="-3", weight=1.0, method="rule",
+        self.rule = RuleItem(key="hasRequirement", default="-3", weight=1.0, method="code",
                              evaluation=REQUIREMENT_EVALUATION, comment="")
 
     def test_contains(self):

@@ -1,8 +1,11 @@
-"""结构性规则：baseScore / hasNameID / redundantRName / hasCatalogue / hasReference。"""
+"""结构性规则：baseScore / stdDoc / useTmpl / hasNameID /
+redundantRName / hasCatalogue / hasReference。
+"""
 
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from ..models import ParsedReport, RuleItem
 
@@ -11,6 +14,40 @@ def base_score(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     """报告存在即 +25（能解析出来即视为已提交）。"""
     score = rule.default_numeric() or 0.0
     return score, rule.comment or f"报告已提交，+{score:g}分"
+
+
+def std_doc(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
+    """文档格式：原始文档后缀必须是 .docx，否则按默认值扣分。"""
+    if Path(report.source_path).suffix.lower() == ".docx":
+        return 0.0, "报告按要求以 .docx 格式提交，不扣分。"
+    penalty = rule.default_numeric() or 0.0
+    return penalty, rule.comment or f"报告未按要求的 .docx 格式提交，{penalty:+g}分。"
+
+
+# 指定模板封面中的学校英文名：忽略大小写，字符之间允许任意数量空白
+UNIVERSITY_NAME = re.compile(
+    r"J\s*I\s*A\s*N\s*G\s*S\s*U\s*U\s*N\s*I\s*V\s*E\s*R\s*S\s*I\s*T\s*Y",
+    re.IGNORECASE,
+)
+
+
+def use_template(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
+    """是否使用指定模板：真实学号之前须出现“JIANGSU UNIVERSITY”。
+
+    只认实际学号（文件名解析出的 report.student_id），不把报告里的
+    “学号”二字当作学号；找不到学号同样按未使用模板扣分。
+    学校名不区分大小写，字符之间允许任意数量空白（含换行/制表符）。
+    """
+    text = report.md_text
+    sid = str(report.student_id).strip()
+    pos = text.find(sid) if sid else -1
+    if pos < 0:
+        penalty = rule.default_numeric() or 0.0
+        return penalty, rule.comment or f"报告中未找到学号，{penalty:+g}分。"
+    if UNIVERSITY_NAME.search(text[:pos]):
+        return 0.0, "报告使用指定模板，不扣分。"
+    penalty = rule.default_numeric() or 0.0
+    return penalty, rule.comment or f"报告未使用指定模板，{penalty:+g}分。"
 
 
 def has_name_id(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:

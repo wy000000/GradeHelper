@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -23,6 +25,27 @@ from .config import DEFAULT_DOCUMENT_SUFFIXES
 from .models import ParsedReport, ReportImage
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _quiet_mineru_logs() -> Iterator[None]:
+    """解析期间抑制 MinerU 的 loguru INFO/DEBUG 日志，避免刷屏。
+
+    MinerU 每页输出一条 infer 完成信息，而解析进度已由 run_file_batch 的进度条显示。
+    临时将 loguru 级别提高到 WARNING，解析完成后恢复默认配置。
+    """
+    try:
+        from loguru import logger as loguru_logger
+    except ImportError:
+        yield
+        return
+    loguru_logger.remove()
+    loguru_logger.add(sys.stderr, level="WARNING")
+    try:
+        yield
+    finally:
+        loguru_logger.remove()
+        loguru_logger.add(sys.stderr, level="INFO")
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".jp2"}
 PIC_PATTERN = re.compile(r"\[\[PIC:([^\]]+)\]\]")
@@ -251,7 +274,7 @@ def _mineru_parse(path: Path, base_name: str, warnings: list[str],
         from mineru.parser.writer import FileBasedDataWriter
     except ImportError as exc:  # 延迟导入：未安装 MinerU 时不影响其它阶段
         raise RuntimeError(
-            "未安装 MinerU（需要 mineru>=4.0）："
+            "未安装 MinerU（需要 mineru>=4.0）：请先安装"
             'pip install "mineru>=4.0,<5"'
         ) from exc
 
@@ -338,20 +361,21 @@ def parse_all(
             except Exception:  # noqa: BLE001 记录失败不应影响解析流程
                 logger.debug("解析中间失败回调异常", exc_info=True)
 
-    outcome = run_file_batch(
-        stage="doc",
-        items=paths,
-        worker=lambda path: parse_report(
-            path, name_format=name_format, separator=separator, tag_dep=tag_dep,
-            suffixes=suffixes, mineru_tier=mineru_tier),
-        workers=max(1, int(workers)),
-        path_of=lambda path: path,
-        label_of=lambda path: path.name,
-        unit="份",
-        on_failure=_on_final_failure,
-        on_retry=_on_retry_failure,
-        max_attempts=max_attempts,
-    )
+    with _quiet_mineru_logs():
+        outcome = run_file_batch(
+            stage="doc",
+            items=paths,
+            worker=lambda path: parse_report(
+                path, name_format=name_format, separator=separator, tag_dep=tag_dep,
+                suffixes=suffixes, mineru_tier=mineru_tier),
+            workers=max(1, int(workers)),
+            path_of=lambda path: path,
+            label_of=lambda path: path.name,
+            unit="份",
+            on_failure=_on_final_failure,
+            on_retry=_on_retry_failure,
+            max_attempts=max_attempts,
+        )
     return outcome.results
 
 

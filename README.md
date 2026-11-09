@@ -61,8 +61,8 @@ python -m gradehelper --version   # 查看版本号
 | 配置与信息 | `--config PATH` | 文件路径 | 项目根目录 `config.yaml` |
 | 配置与信息 | `-h, --help` | 开关 | — |
 | 配置与信息 | `--version` | 开关 | — |
-| 任务与路径 | `--reports DIR` | 目录 | `paths.reports_dir` |
-| 任务与路径 | `--template XLSX` | 文件 | `paths.template` |
+| 任务与路径 | `--reports DIR` | 目录 | 当前工作目录 |
+| 任务与路径 | `--template XLSX` | 文件 | **必填**（留空则报错退出） |
 | 任务与路径 | `--output XLSX` | 文件 | `paths.output`；留空则按 `paths.result_name_format` 生成 |
 | 任务与路径 | `--tagDep NAME` | 字符串 | `系部专业` |
 | 流程控制 | `--stage STAGE` | `doc` / `pic` / `sen` / `full` | `full` |
@@ -73,7 +73,7 @@ python -m gradehelper --version   # 查看版本号
 
 | 参数 | 说明 |
 | --- | --- |
-| `--config PATH` | 指定配置文件。文件不存在时不报错，按内置默认值运行（端点、路径、Prompt 全为空），此时必须显式给出 `--reports`、`--template`，否则 `doc` 阶段找不到报告、`sen` 阶段拿不到有效 Prompt |
+| `--config PATH` | 指定配置文件。文件不存在时不报错，按内置默认值运行（端点、路径、Prompt 全为空）；`--reports` 缺省为当前工作目录，`--template` 始终必填（留空报错退出） |
 | `-h, --help` | 打印参数帮助并退出（不执行评分，退出码 0） |
 | `--version` | 打印版本号并退出（不执行评分，退出码 0） |
 
@@ -81,8 +81,8 @@ python -m gradehelper --version   # 查看版本号
 
 | 参数 | 说明 |
 | --- | --- |
-| `--reports DIR` | 报告目录，覆盖 `paths.reports_dir`。`doc` 阶段只扫描该目录**顶层**符合命名格式、且后缀在 `paths.document_suffixes` 中的文档（默认 `.docx`/`.doc`/`.pdf`，不搜索子目录）；`pic` / `sen` 阶段不重新解析原文档，只扫描该目录**顶层**的 `*.md` |
-| `--template XLSX` | 评分模板，覆盖 `paths.template`。只读取模板中的 `rule` 表（评分项、权重、处理方法、评分标准），**结果不写入模板** |
+| `--reports DIR` | 报告目录，仅由启动参数提供，**默认当前工作目录**。`doc` 阶段只扫描该目录**顶层**符合命名格式、且后缀在 `paths.document_suffixes` 中的文档（默认 `.docx`/`.doc`/`.pdf`，不搜索子目录）；`pic` / `sen` 阶段不重新解析原文档，只扫描该目录**顶层**的 `*.md` |
+| `--template XLSX` | 评分模板，**仅由启动参数提供且必填**（为空则记录错误日志并退出）。只读取模板中的 `rule` 表（评分项、权重、处理方法、评分标准），**结果不写入模板** |
 | `--output XLSX` | 结果 xlsx，覆盖 `paths.output`。相对路径以当前工作目录为准；留空时按 `paths.result_name_format` 生成（与模板同目录） |
 | `--tagDep NAME` | 系部专业标识，用于结果文件名与日志文件名中的 `{tagDep}` 占位符（默认 `系部专业`） |
 
@@ -200,11 +200,8 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `reports_dir` | 空 | 报告目录（可用 `--reports` 覆盖） |
-| `template` | 空 | 评分模板 xlsx（可用 `--template` 覆盖） |
 | `output` | 空 | 结果 xlsx；留空按 `result_name_format` 生成（可用 `--output` 覆盖） |
 | `captions_dir` | 空 | 图片描述 txt 保存目录；留空表示与原报告同目录 |
-| `save_parsed` | `false` | 已废弃：md 与图片始终落盘到与原报告相同目录 |
 | `log_path` | 空 | 运行日志文件路径；留空按 `log_name_format` 生成 |
 | `log_name_format` | `{course}-{tagDep}-{reportName}.log` | 运行日志文件名格式（与模板同目录） |
 | `log_max_size_kb` | `32` | 日志超过该大小（KB）才清理旧记录；`0` 表示不清理 |
@@ -228,7 +225,7 @@ python -m gradehelper --config .\config.test.yaml -v --reports D:\AI\Reports --t
 ## 灵活性
 
 评分项完全由 `rule` 表驱动：
-- `处理方法=rule` 且在 `gradehelper/rules/` 中注册过的评分项走程序化规则（按评分项名称匹配注册表）
+- `处理方法=code` 且在 `gradehelper/rules/` 中注册过的评分项走程序化规则（按评分项名称匹配注册表）
 - 其余 `处理方法=LLM` 的项走通用 LLM 通道（逐文件批量：一次提交该文件的全部 LLM 项）
 - 换课程/换报告类型只需换模板文件；新增程序化规则在 `gradehelper/rules/` 实现并注册即可
 

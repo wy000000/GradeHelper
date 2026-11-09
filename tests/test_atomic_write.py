@@ -34,7 +34,7 @@ def _report(student_id: str = "2021001") -> ParsedReport:
 
 def _rules() -> list[RuleItem]:
     return [
-        RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+        RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                  evaluation="", comment="报告已提交，+25分"),
         RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
                  evaluation="事件描述", comment=""),

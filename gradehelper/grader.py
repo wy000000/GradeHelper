@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -129,6 +130,7 @@ class Grader(RunLogMixin):
         warning_count = 0
         doc_failed = 0
         save_failed = 0
+        scoring_failed = 0
         image_total = 0
         image_kept = 0
         warnings_log: list[str] = []
@@ -235,7 +237,8 @@ class Grader(RunLogMixin):
 
             # 移除被 skip 的图片（不保存图片文件）及其占位符，保持剩余图片原始编号；
             # 解析出的 md 同步去除空行（落盘与后续阶段使用同一份内容）
-            for report in reports:
+            total_reports = len(reports)
+            for idx, report in enumerate(reports, 1):
                 for warning in report.warnings:
                     _record_event("警告",
                                   f"{Path(report.source_path).name}: {warning}")
@@ -245,8 +248,12 @@ class Grader(RunLogMixin):
                 image_kept += len(report.images)
                 report.md_text = strip_blank_lines(
                     remove_skipped_placeholders(report.md_text, skip_images))
-                logger.info("  已解析 %s（图片 %d 张，跳过前 %d 张，剩余 %d 张）",
-                            report.base_name, before, skip_images, len(report.images))
+                line = (f"  已解析 {idx}/{total_reports}: {report.base_name}"
+                        f"（图片 {before} 张，跳过前 {skip_images} 张，剩余 {len(report.images)} 张）")
+                sys.stderr.write("\r" + line)
+                sys.stderr.flush()
+            sys.stderr.write("\n")
+            sys.stderr.flush()
 
             logger.info("【阶段 doc】共解析图片 %d 张（跳过前 %d 张，保留 %d 张）",
                         image_total, skip_images, image_kept)
@@ -286,6 +293,8 @@ class Grader(RunLogMixin):
                         result_path, format_duration(time.perf_counter() - t0))
             return result_path
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
+            # 评分或写表阶段中断：已解析保存但未完成整个阶段的文档计入失败
+            scoring_failed = len(reports)
             error = str(exc) or exc.__class__.__name__
             _record_event("错误", f"阶段中断: {error}", count=False)
             raise
@@ -295,9 +304,10 @@ class Grader(RunLogMixin):
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
             extra: dict[str, str] = {}
-            doc_failed_total = doc_failed + save_failed
-            doc_total = len(reports) + doc_failed_total
-            extra["文档"] = (f"处理 {doc_total} 份 / 成功 {len(reports)} 份 / "
+            doc_succeeded = len(reports) - scoring_failed
+            doc_failed_total = doc_failed + save_failed + scoring_failed
+            doc_total = doc_succeeded + doc_failed_total
+            extra["文档"] = (f"处理 {doc_total} 份 / 成功 {doc_succeeded} 份 / "
                              f"失败 {doc_failed_total} 份")
             if rule_items:
                 llm_count = sum(1 for item in rule_items if item.is_llm)
@@ -332,7 +342,7 @@ class Grader(RunLogMixin):
                 template=template,
                 output=result_path,
                 processed=doc_total,
-                succeeded=len(reports),
+                succeeded=doc_succeeded,
                 failed=doc_failed_total,
                 unit="份",
                 # 中间错误已按时序写入日志，总结里只保留条数
@@ -650,8 +660,14 @@ class Grader(RunLogMixin):
         finally:
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
-            doc_failed_total = load_failed + len(md_write_failed)
-            doc_success = max(0, len(reports) - len(md_write_failed))
+            if error:
+                # 阶段中断：已加载但未完成整个阶段的文档都算失败
+                failed_in_reports = len(reports)
+            else:
+                # 正常完成：md 回写失败的文档算失败（图片识别/txt 失败只影响图片计数）
+                failed_in_reports = len(md_write_failed)
+            doc_success = len(reports) - failed_in_reports
+            doc_failed_total = load_failed + failed_in_reports
             doc_total = doc_success + doc_failed_total
             extra: dict[str, str] = {
                 "文档": (f"处理 {doc_total} 份 / 成功 {doc_success} 份 / "
@@ -1056,8 +1072,12 @@ class Grader(RunLogMixin):
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
             sen_failed = load_failed + grade_failed
+            if error:
+                # 阶段中断：未完成评分的报告算失败
+                unfinished = max(0, len(reports) - len(completed_reports) - grade_failed)
+                sen_failed += unfinished
             sen_success = len(completed_reports)
-            sen_total = len(reports) + load_failed
+            sen_total = sen_success + sen_failed
             sen_pending = max(0, sen_total - sen_success - sen_failed)
             failed_docs_text = "、".join(failed_documents)
             extra: dict[str, str] = {
@@ -1155,8 +1175,13 @@ class Grader(RunLogMixin):
             output: str | None = None, stage: str = "full",
             skip_images: int = 2, tag_dep: str = "系部专业") -> Path | None:
         cfg = self.config
-        reports_dir = reports_dir or cfg.paths.reports_dir
-        template = template or cfg.paths.template
+        # reports_dir 仅由启动参数提供，默认当前工作目录
+        reports_dir = reports_dir or str(Path.cwd())
+        # template 仅由启动参数提供，不能为空
+        template = (template or "").strip()
+        if not template:
+            logger.error("评分模板未指定：--template 不能为空，请通过启动参数传入")
+            raise SystemExit(1)
         # 结果输出路径：显式指定优先；留空则按 paths.result_name_format 在模板同目录生成
         output = output or cfg.paths.output or None
 

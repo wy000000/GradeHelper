@@ -28,7 +28,7 @@ class TestEuclideanSimilarity(unittest.TestCase):
 
 class TestCopiedBatch(unittest.TestCase):
     def test_batch(self):
-        rule = RuleItem(key="copied", default="-5", weight=1.0, method="rule", evaluation="", comment="")
+        rule = RuleItem(key="copied", default="-5", weight=1.0, method="code", evaluation="", comment="")
         a = make_report("完全一样的报告正文" * 50, "2024001", "张三")
         b = make_report("完全一样的报告正文" * 50, "2024002", "李四")
         c = make_report("独一无二的报告内容，与任何人都不相似。" * 20, "2024003", "王五")

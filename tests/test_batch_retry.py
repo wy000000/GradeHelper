@@ -215,7 +215,7 @@ class TestSenRetry(unittest.TestCase):
         self.template.write_bytes(b"")
         self.result_path = self.tmp / "result.xlsx"
         self.rules = [
-            RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+            RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                      evaluation="", comment="规则评语"),
             RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
                      evaluation="事件描述", comment=""),
@@ -453,7 +453,7 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
     @staticmethod
     def _rules():
         return [
-            RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+            RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                      evaluation="", comment="规则评语"),
             RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
                      evaluation="事件描述", comment=""),

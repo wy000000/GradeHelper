@@ -88,13 +88,10 @@ class EndpointConfig:
 
 @dataclass
 class PathsConfig:
-    """路径配置，全部来自 YAML。"""
+    """路径配置（reports_dir 与 template 仅由启动参数提供，不在 YAML 中配置）。"""
 
-    reports_dir: str = ""
-    template: str = ""
     output: str = ""
     captions_dir: str = ""
-    save_parsed: bool = False
     log_path: str = ""  # 运行日志文件路径；留空表示按 log_name_format 生成
     log_name_format: str = "{course}-{tagDep}-{reportName}.log"  # 日志文件名格式
     log_max_size_kb: int = 32       # 日志超过该大小（KB）才清理旧记录；0 表示不清理

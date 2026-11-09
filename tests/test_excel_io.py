@@ -30,7 +30,7 @@ def _report(student_id: str = "2021001") -> ParsedReport:
 
 def _rules(with_llm: bool = True) -> list[RuleItem]:
     rules = [
-        RuleItem(key="baseScore", default="25", weight=1.0, method="rule",
+        RuleItem(key="baseScore", default="25", weight=1.0, method="code",
                  evaluation="", comment="报告已提交，+25分"),
     ]
     if with_llm:
