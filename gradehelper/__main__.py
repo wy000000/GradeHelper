@@ -51,10 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     incremental = False
     # incremental = True
     skip_images = 2
-    # 只更新指定的报告文件（主名或完整文件名）；none 表示处理目录内全部文件。
+    # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；日志用「模式」记录
     # 全部全量 / 全部增量 / 指定全量 / 指定增量。
-    files = ["none"]
+    files = None
 
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "sen 只评分 LLM 项未评分的报告")
     parser.add_argument("--files", nargs="+", default=files, metavar="NAME",
                         help="只更新指定的报告文件（主名或完整文件名，逗号/空格分隔，"
-                             "对 doc/pic/sen 三个阶段均有效）；none=处理全部（默认）")
+                             "对 doc/pic/sen 三个阶段均有效）；省略=处理全部（默认）")
     return parser
 
 def main(argv: list[str] | None = None) -> int:

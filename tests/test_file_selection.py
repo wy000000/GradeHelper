@@ -131,8 +131,12 @@ class TestModeLabel(unittest.TestCase):
 
 
 class TestFilesArgument(unittest.TestCase):
-    def test_default_is_none_token(self):
-        self.assertEqual(cli.build_parser().parse_args([]).files, ["none"])
+    def test_default_is_none(self):
+        self.assertIsNone(cli.build_parser().parse_args([]).files)
+
+    def test_explicit_none_token_means_no_filter(self):
+        args = cli.build_parser().parse_args(["--files", "none"])
+        self.assertEqual(normalize_file_names(args.files), [])
 
     def test_space_separated_values(self):
         args = cli.build_parser().parse_args(["--files", "a.docx", "b.docx"])
