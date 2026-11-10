@@ -205,6 +205,7 @@ class TestDocSpecifiedFiles(unittest.TestCase):
         write_mock.assert_called_once()
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定全量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定全量")
         self.assertIn("指定文件: 1 个（", log_text)
         self.assertNotIn("增量模式:", log_text)
 
@@ -229,6 +230,7 @@ class TestDocSpecifiedFiles(unittest.TestCase):
         self.assertEqual(entry.extra.get("增量跳过"), "1 个结果文件中已有记录的文档")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定增量")
 
     def test_unmatched_name_warns_but_others_continue(self):
         doc1 = _docx(self.tmp, "2021001")
@@ -304,6 +306,7 @@ class TestPicSpecifiedFiles(unittest.TestCase):
         self.assertEqual(received, [("2021001", 3)])
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定全量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定全量")
 
     def test_specified_incremental_skips_described_within_list(self):
         self._write_report("2021001", described=True)
@@ -325,6 +328,7 @@ class TestPicSpecifiedFiles(unittest.TestCase):
         self.assertEqual(entry.extra.get("增量跳过"), "1 张已有描述图片（1 份报告）")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定增量")
 
 
 class TestSenSpecifiedFiles(unittest.TestCase):
@@ -389,6 +393,7 @@ class TestSenSpecifiedFiles(unittest.TestCase):
         self.assertEqual(graded, ["2021002"])
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定全量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定全量")
 
     def test_specified_incremental_skips_scored_within_list(self):
         self._seed({
@@ -423,6 +428,7 @@ class TestSenSpecifiedFiles(unittest.TestCase):
         self.assertEqual(entry.extra.get("增量跳过"), "1 份 LLM 项已评分报告")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定增量")
 
     def test_specified_incremental_without_result_row_still_errors(self):
         """名单内文件在结果表中没有行：保持现有前置校验（提示先跑 doc）。"""

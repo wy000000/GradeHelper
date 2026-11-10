@@ -265,6 +265,9 @@ class Grader(RunLogMixin):
                 tag_dep=tag_dep,
                 report_name=start_report_name,
                 config={
+                    # 模式紧跟「运行开始」，便于先看到本次是全部/指定、全量/增量
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                     "报告目录": str(reports_dir),
                     "评分模板": str(template),
                     "结果文件": str(hint) if hint else "",
@@ -273,8 +276,6 @@ class Grader(RunLogMixin):
                     "并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "模式": _run_mode_label(self.incremental, self.files),
-                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             self._ensure_result_writable(hint)
@@ -636,6 +637,8 @@ class Grader(RunLogMixin):
                 tag_dep=tag_dep,
                 report_name=start_report_name,
                 config={
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                     "报告目录": str(reports_dir),
                     "评分模板": str(template),
                     "base_url": cfg.vllm.base_url or "（未配置）",
@@ -644,8 +647,6 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "模式": _run_mode_label(self.incremental, self.files),
-                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             caption_template = cfg.prompts.image_context
@@ -1053,6 +1054,8 @@ class Grader(RunLogMixin):
                 tag_dep=tag_dep,
                 report_name=start_report_name,
                 config={
+                    "模式": _run_mode_label(self.incremental, self.files),
+                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                     "报告目录": str(reports_dir),
                     "评分模板": str(template),
                     "结果文件": str(hint) if hint else "",
@@ -1062,8 +1065,6 @@ class Grader(RunLogMixin):
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
-                    "模式": _run_mode_label(self.incremental, self.files),
-                    **({"指定文件": _files_label(self.files)} if self.files else {}),
                 },
             )
             self._ensure_result_writable(hint)

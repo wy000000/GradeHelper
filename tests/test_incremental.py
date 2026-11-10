@@ -186,6 +186,7 @@ class TestDocIncremental(unittest.TestCase):
         self.assertEqual(entry.processed_count, 1)
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 全部增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 全部增量")
         self.assertNotIn("增量模式:", log_text)
 
     def test_all_documents_recorded_skips_parse_rules_and_write(self):
@@ -271,6 +272,7 @@ class TestPicIncremental(unittest.TestCase):
         self.assertEqual(entry.extra.get("增量跳过"), "1 张已有描述图片（1 份报告）")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 全部增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 全部增量")
         self.assertNotIn("增量模式:", log_text)
 
     def test_full_mode_still_sends_all_images(self):
@@ -358,6 +360,7 @@ class TestSenIncremental(unittest.TestCase):
         self.assertEqual(entry.extra.get("增量跳过"), "1 份 LLM 项已评分报告")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 全部增量", log_text)
+        self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 全部增量")
         self.assertNotIn("增量模式:", log_text)
 
     def test_all_scored_reports_are_skipped_without_llm_or_write(self):
