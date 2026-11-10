@@ -40,17 +40,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="课程报告自动化评分系统（MinerU 解析 + 规则引擎 + LLM 评估）",
     )
     reports_dir = str(Path.cwd())
-    reports_dir = "D:/AI/Reports/"
     gradeTemplate_dir = None
+
+    reports_dir = "D:\AI\Reports"
+    # reports_dir = "D:\AI\Reports\课程报告"
     gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
+
+    # reports_dir = "D:\AI\Reports"
+    # reports_dir = "D:\AI\Reports\实验报告"
     # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+
     skip_images = 2
     stage = "doc"
     stage = "pic"
     stage = "sen"
-    # stage = "full"
+    # stage = "full"    
     incremental = False
-    incremental = True
+    # incremental = True
 
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；

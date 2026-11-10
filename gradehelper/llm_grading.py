@@ -48,8 +48,8 @@ def grade_with_llm_batch(client: LLMClient, report: ParsedReport,
         comment = str(entry.get("comment") or rule.comment or "").strip()
         result[rule.key] = ItemScore(key=rule.key, score=score,
                                      confidence=confidence, comment=comment)
-        logger.info("  %s / %s -> score=%s confidence=%s (batch)",
-                    report.student_id, rule.key, score, confidence)
+        logger.debug("  %s / %s -> score=%s confidence=%s (batch)",
+                     report.student_id, rule.key, score, confidence)
     if invalid:
         raise ValueError(
             "LLM 返回的 JSON 数据不完整（可能被截断），视为处理失败: "
