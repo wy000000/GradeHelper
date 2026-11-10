@@ -195,8 +195,7 @@ class TestLoadReportsWarnings(unittest.TestCase):
             f"{_full(3)}\n正文\n", encoding="utf-8")
         # 不创建 P3 图片文件
 
-        with self.assertLogs("gradehelper.report_io", level="WARNING"):
-            reports = _grader()._load_reports_for_pic(self.tmp, skip_images=0)
+        reports = _grader()._load_reports_for_pic(self.tmp, skip_images=0)
 
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0].images, [])

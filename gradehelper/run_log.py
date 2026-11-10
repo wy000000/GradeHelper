@@ -314,7 +314,8 @@ class RunLogMixin:
     def _append_stage_event(self, *, stage: str, level: str, message: str) -> None:
         """处理过程中按时序追加一条出错/报警信息（含文档名与出错内容）。
 
-        只写入日志文件；控制台的对应输出由各处理点的 logging 负责，避免重复刷屏。
+        除写入日志文件外，同步输出到控制台：错误按 ERROR、其余按 WARNING。
+        控制台使用宿主模块的 logger（如 gradehelper.grader），与现有阶段日志一致。
         """
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
@@ -326,6 +327,11 @@ class RunLogMixin:
             _SEP_DASH,
         ]
         self._append_log("\n".join(lines) + "\n")
+        event_logger = logging.getLogger(type(self).__module__)
+        if level == "错误":
+            event_logger.error("【阶段 %s】%s", stage, message)
+        else:
+            event_logger.warning("【阶段 %s】%s", stage, message)
 
     def _build_stage_entry(self, *, stage: str, reports: list[ParsedReport],
                            tag_dep: str, start_dt: datetime, end_dt: datetime,

@@ -411,12 +411,14 @@ def parse_all(
                                  separator=separator, suffixes=suffixes))
 
     def _on_final_failure(failed) -> None:
-        logger.error("解析失败 %s: %s", failed.path.name, failed.reason)
-        if on_error is not None:
-            try:
-                on_error(failed.path, failed.error)
-            except Exception:  # noqa: BLE001 记录失败不应影响解析流程
-                logger.debug("解析失败回调异常", exc_info=True)
+        # 有 on_error 时由调用方统一记录（含文档名与原因），这里不重复输出
+        if on_error is None:
+            logger.error("解析失败 %s: %s", failed.path.name, failed.reason)
+            return
+        try:
+            on_error(failed.path, failed.error)
+        except Exception:  # noqa: BLE001 记录失败不应影响解析流程
+            logger.debug("解析失败回调异常", exc_info=True)
 
     def _on_retry_failure(failed) -> None:
         if on_retry is not None:

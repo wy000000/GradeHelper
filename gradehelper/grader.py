@@ -281,8 +281,9 @@ class Grader(RunLogMixin):
             self._ensure_result_writable(hint)
             claim = ResultFileClaim(hint)
             claim.acquire()
-            # 指定文件（--files）：先扫描目录并按名单筛选，未命中的名字逐条告警；
-            # 全部未命中时报错退出，避免“指定了文件却什么都没做”仍返回成功。
+            # 指定文件（--files）：先扫描目录并按名单筛选，未命中的名字逐条记为错误；
+            # 部分未命中时继续解析命中的文件；全部未命中时报错退出，避免“指定了文件
+            # 却什么都没做”仍返回成功。
             # 增量 doc：以结果文件 result 表中的学号记录为准，只解析没有记录的文档；
             # 结果文件不存在（首次运行）时解析全部文档。
             pending_paths: list[Path] | None = None
@@ -309,7 +310,7 @@ class Grader(RunLogMixin):
                     all_docs, unmatched = select_paths(all_docs, self.files)
                     for name in unmatched:
                         _record_event(
-                            "警告",
+                            "错误",
                             f"指定的文件未找到（或不符合命名格式）: {name}")
                     if not all_docs:
                         raise RuntimeError(
@@ -403,7 +404,6 @@ class Grader(RunLogMixin):
             warning_count = len(warnings)
             for w in warnings:
                 _record_event("警告", w)
-                logger.warning("  %s", w)
 
             # 只写程序化（code）评分项；LLM 项由 sen 阶段填写，doc 不覆盖已有值
             result_path = self._resolve_result_path(template, reports, output)
@@ -557,8 +557,6 @@ class Grader(RunLogMixin):
             caption_errors[(_report_key(report), image.index)] = reason
             _record_event("警告",
                           f"{report.base_name}-P{image.index}: 图片识别失败: {reason}")
-            logger.warning("【阶段 pic】图片识别失败 %s-P%d: %s",
-                           report.base_name, image.index, reason)
 
         def _embed_and_save_md(report: ParsedReport) -> None:
             """把当前已识别的描述嵌入 md 并落盘（可重复调用，不会重复嵌入）。"""
@@ -787,7 +785,6 @@ class Grader(RunLogMixin):
                     continue
                 name = f"{report.base_name}-P{index}.txt"
                 caption_write_failed.append(f"{name}: {reason}")
-                logger.error("【阶段 pic】描述写盘失败 %s: %s", name, reason)
                 _record_failed_doc(Path(report.source_path).name)
                 _record_event(
                     "错误",
@@ -799,7 +796,6 @@ class Grader(RunLogMixin):
                 if report is None:
                     continue
                 md_write_failed[report.base_name] = reason
-                logger.error("【阶段 pic】md 回写失败 %s: %s", report.base_name, reason)
                 _record_failed_doc(Path(report.source_path).name)
                 _record_event(
                     "错误",
@@ -814,10 +810,6 @@ class Grader(RunLogMixin):
                     "【阶段 pic】%d 张描述 / %d 份 md 写盘失败（其余已按批回写），"
                     "可重跑 --stage pic 补齐",
                     len(caption_write_failed), len(md_write_failed))
-                for line in caption_write_failed:
-                    logger.error("  %s", line)
-                for name, reason in md_write_failed.items():
-                    logger.error("  %s.md: %s", name, reason)
             logger.info("【阶段 pic】完成，图片描述已嵌入 md 并落盘，耗时 %s",
                         format_duration(time.perf_counter() - t0))
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
@@ -924,6 +916,8 @@ class Grader(RunLogMixin):
         completed_reports: list[ParsedReport] = []
         load_failed = 0
         grade_failed = 0
+        # 学号不在 result 表而被跳过的报告数（记入失败数，但不中断其余报告评分）
+        missing_skipped = 0
         # 最终失败文档：md 全名（课程-班级-学号-姓名-报告名.md），按全名去重，重试多轮只计一次
         failed_documents: list[str] = []
         failed_seen: set[str] = set()
@@ -1007,7 +1001,6 @@ class Grader(RunLogMixin):
                 grade_failed += 1
             if failed_report is None:
                 failed_report = report
-            logger.error("【阶段 sen】评分失败 %s: %s", label, failed.reason)
             _record_event(
                 "错误",
                 f"{label}: 评分失败（重试后仍失败，已跳过）: {failed.reason}",
@@ -1162,19 +1155,32 @@ class Grader(RunLogMixin):
                         return result_path
 
                 # 学号覆盖检查：sen 只更新 result 表中已有的行（strict 不新增行），
-                # 缺学号的报告必然在写表时失败，提前在这里报错退出，避免白跑一遍 LLM。
-                missing_ids = [report.student_id for report in reports
-                               if str(report.student_id).strip() not in existing_scores]
-                if missing_ids:
-                    shown = "、".join(missing_ids[:10])
-                    if len(missing_ids) > 10:
-                        shown += f" 等 {len(missing_ids)} 个"
-                    raise RuntimeError(
-                        f"sen 阶段：{len(missing_ids)} 份报告的学号不在结果文件 result 表中，"
-                        "程序退出，未进行 LLM 提交（请先执行 doc 阶段生成结果文件）。\n"
-                        f"结果文件：{result_path}\n"
-                        f"缺少学号：{shown}"
-                    )
+                # 缺学号的报告无法写回：记录错误并跳过这些报告，继续评分其余报告
+                # （不为写不进结果表的报告白跑 LLM，也不因个别缺行整体退出）。
+                missing_reports = [report for report in reports
+                                   if str(report.student_id).strip() not in existing_scores]
+                if missing_reports:
+                    for report in missing_reports:
+                        label = _doc_name(report)
+                        if _record_failed(label):
+                            missing_skipped += 1
+                        if failed_report is None:
+                            failed_report = report
+                        _record_event(
+                            "错误",
+                            f"{label}: 学号不在结果文件 result 表中，已跳过"
+                            "（请先执行 doc 阶段生成结果文件）",
+                            count=False)
+                    missing_sids = {str(report.student_id).strip()
+                                    for report in missing_reports}
+                    reports = [report for report in reports
+                               if str(report.student_id).strip() not in missing_sids]
+                    if not reports:
+                        logger.error(
+                            "【阶段 sen】%d 份报告的学号都不在结果文件 result 表中，"
+                            "未进行 LLM 提交（请先执行 doc 阶段生成结果文件）",
+                            missing_skipped)
+                        return result_path
 
                 logger.info("【阶段 sen】LLM 评分项批量评估（每份报告一次提交 %d 项），并发 %d",
                             len(llm_rules), max(1, cfg.llm.batch_size))
@@ -1205,10 +1211,8 @@ class Grader(RunLogMixin):
                             checkpoint_retry_at = len(completed_reports) + checkpoint_every
                             _record_event(
                                 "警告",
-                                f"实时回写失败（将在下一批后重试）: {save_exc}")
-                            logger.warning(
-                                "【阶段 sen】实时回写失败（将在下一批后重试，"
-                                "结束时会再写一次）: %s", save_exc)
+                                f"实时回写失败（将在下一批后重试，结束时会再写一次）: "
+                                f"{save_exc}")
 
                 run_file_batch(
                     stage="sen",
@@ -1264,7 +1268,6 @@ class Grader(RunLogMixin):
                         error, len(completed_reports), len(reports), out,
                     )
                 except Exception as save_exc:  # noqa: BLE001 保存失败不掩盖原始异常
-                    logger.error("【阶段 sen】保存已完成评分失败: %s", save_exc)
                     _record_event("错误", f"保存已完成评分失败: {save_exc}",
                                   count=False)
             raise
@@ -1273,7 +1276,7 @@ class Grader(RunLogMixin):
                 claim.release()  # 阶段结束（成功或失败）都必须释放独占句柄
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
-            sen_failed = load_failed + grade_failed
+            sen_failed = load_failed + grade_failed + missing_skipped
             if error:
                 # 阶段中断：未完成评分的报告算失败
                 unfinished = max(0, len(reports) - len(completed_reports) - grade_failed)
@@ -1301,6 +1304,8 @@ class Grader(RunLogMixin):
             if grade_failed:
                 extra["评分失败"] = f"{grade_failed} 份"
                 extra["异常队列"] = f"{grade_failed} 份重试后仍失败"
+            if missing_skipped:
+                extra["学号缺失"] = f"{missing_skipped} 份（不在 result 表，已跳过）"
             if failed_documents:
                 extra["失败文档"] = failed_docs_text
             if result_path:
@@ -1371,7 +1376,6 @@ class Grader(RunLogMixin):
         detail = entry.error or f"最终失败 {entry.failed_count} 项"
         message = (f"阶段 {finished} 存在错误（{detail}），已完成本阶段，"
                    f"不再执行后续阶段（{'、'.join(skipped)} 未运行）")
-        logger.error("%s", message)
         self._append_stage_event(stage=finished, level="错误", message=message)
         raise RuntimeError(message)
 

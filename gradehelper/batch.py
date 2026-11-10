@@ -122,9 +122,10 @@ def run_file_batch(
     - ``workers``：并发线程数；
     - ``path_of``：从 item 取文件路径，异常队列用它去重；
     - ``label_of``：进度显示用的简短标签；
-    - ``on_failure``：最终仍未成功的文件回调（每轮失败只在日志中提示，
-      避免同一文件产生多条失败记录）；
-    - ``on_retry``：某文件本次失败、且后面还会重试时回调，用于记录中间错误；
+    - ``on_failure``：最终仍未成功的文件回调（提供后由调用方记录失败，避免与
+     批处理自身的控制台提示重复）；
+    - ``on_retry``：某文件本次失败、且后面还会重试时回调，用于记录中间错误
+      （提供后由调用方输出该次失败，批处理不再重复提示）；
     - ``on_success``：每个文件成功后立即回调（用于 sen 的实时回写）；
     - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮；
     - ``progress_stage``：进度条显示的阶段名；默认与 ``stage`` 相同。
@@ -190,11 +191,14 @@ def run_file_batch(
                             path = path_of(item)
                             failed = FailedFile(item, path, exc, attempt)
                             failures.add(item, path, exc, attempt)
-                            logger.warning(
-                                "【阶段 %s】%s 处理失败（第 %d/%d 次）: %s",
-                                stage, _label(item, path_of, label_of), attempt,
-                                total_attempts, str(exc) or exc.__class__.__name__,
-                            )
+                            # 无回调时由批处理自己提示；有 on_retry 时由调用方
+                            # 统一记录中间错误（避免控制台重复输出同一条失败）
+                            if on_retry is None:
+                                logger.warning(
+                                    "【阶段 %s】%s 处理失败（第 %d/%d 次）: %s",
+                                    stage, _label(item, path_of, label_of), attempt,
+                                    total_attempts, str(exc) or exc.__class__.__name__,
+                                )
                             # 本次失败且后续还会重试：通知调用方记录中间错误
                             if attempt < total_attempts and on_retry is not None:
                                 try:
@@ -239,9 +243,11 @@ def run_file_batch(
             "【阶段 %s】重试结束，仍有 %d 个文件失败（已跳过，其余文件处理完成）",
             stage, len(failures),
         )
-        for failed in failures.values():
-            logger.error("  %s: %s",
-                         _label(failed.item, path_of, label_of), failed.reason)
+        # 有 on_failure 时由调用方逐条记录失败（含文档名与原因），这里不再重复逐条输出
+        if on_failure is None:
+            for failed in failures.values():
+                logger.error("  %s: %s",
+                             _label(failed.item, path_of, label_of), failed.reason)
         if on_failure is not None:
             for failed in failures.values():
                 try:

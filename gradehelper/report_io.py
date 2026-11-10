@@ -41,8 +41,10 @@ def load_reports_for_pic(config: AppConfig, reports_dir: Path, skip_images: int,
         if parse_filename(md_path, name_format=name_format, separator=separator,
                           suffixes=(".md",)) is None:
             message = f"跳过不符合命名格式的 md 文件: {md_path.name}"
-            logger.warning("%s", message)
-            if on_warning is not None:
+            # 有 on_warning 时由调用方统一记录（运行日志 + 控制台），避免重复输出
+            if on_warning is None:
+                logger.warning("%s", message)
+            else:
                 try:
                     on_warning(message)
                 except Exception:  # noqa: BLE001 记录失败不应影响加载
@@ -51,12 +53,14 @@ def load_reports_for_pic(config: AppConfig, reports_dir: Path, skip_images: int,
         md_paths.append(md_path)
 
     def _on_final_failure(failed: FailedFile) -> None:
-        logger.error("加载报告失败 %s: %s", failed.path.name, failed.reason)
-        if on_error is not None:
-            try:
-                on_error(failed.path, failed.error)
-            except Exception:  # noqa: BLE001 记录失败不应影响其余报告
-                logger.debug("加载失败回调异常", exc_info=True)
+        # 有 on_error 时由调用方统一记录（含文档名与原因），这里不重复输出
+        if on_error is None:
+            logger.error("加载报告失败 %s: %s", failed.path.name, failed.reason)
+            return
+        try:
+            on_error(failed.path, failed.error)
+        except Exception:  # noqa: BLE001 记录失败不应影响其余报告
+            logger.debug("加载失败回调异常", exc_info=True)
 
     def _on_retry_failure(failed: FailedFile) -> None:
         if on_retry is not None:
@@ -107,7 +111,6 @@ def load_one_report_for_pic(config: AppConfig, md_path: Path, skip_images: int,
         if message not in seen_warnings:
             seen_warnings.add(message)
             warnings.append(message)
-            logger.warning("%s", message)
 
     for pic_file in PIC_PATTERN.findall(md_text):
         candidate = md_path.parent / pic_file

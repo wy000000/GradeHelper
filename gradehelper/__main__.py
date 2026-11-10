@@ -44,16 +44,19 @@ def build_parser() -> argparse.ArgumentParser:
     gradeTemplate_dir = None
     gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
     # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+    skip_images = 2
     stage = "doc"
     stage = "pic"
     stage = "sen"
-    stage = "full"
+    # stage = "full"
     incremental = False
-    # incremental = True
-    skip_images = 2
+    incremental = True
+
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
-    # 名单非空时，增量/全量只对名单内文件有效；日志用「模式」记录
-    # 全部全量 / 全部增量 / 指定全量 / 指定增量。
+    # 名单非空时，增量/全量只对名单内文件有效；
+    # 日志用「模式」记录：全部全量 / 全部增量 / 指定全量 / 指定增量。
+    # files = ["云安全-信息安全2201-3220601014-王庶尧-云安全课程报告"
+    #          ,"云安全-信息安全2301-3220802028-胡崎-云安全课程报告"]    
     files = None
 
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")

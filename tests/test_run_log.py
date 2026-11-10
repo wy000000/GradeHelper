@@ -681,6 +681,21 @@ class TestStageStartAndEvent(unittest.TestCase):
         self.assertIn("2021002.md: 评分失败（重试后仍失败，已跳过）: 始终失败", text)
         self.assertEqual(text.count("记录时间: "), 2)
 
+    def test_events_are_also_shown_on_console(self):
+        """出错/报警既写入运行日志，也按 WARNING/ERROR 输出到控制台。"""
+        with self.assertLogs("gradehelper.grader", level="WARNING") as logs:
+            self.grader._append_stage_event(
+                stage="doc", level="警告", message="2021001.docx: 第 1 次解析失败")
+            self.grader._append_stage_event(
+                stage="doc", level="错误", message="2021002.docx: 解析失败，已跳过")
+        self.assertIn("WARNING:gradehelper.grader:【阶段 doc】2021001.docx",
+                      logs.output[0])
+        self.assertIn("ERROR:gradehelper.grader:【阶段 doc】2021002.docx",
+                      logs.output[1])
+        text = self._read()
+        self.assertIn("级别: 警告", text)
+        self.assertIn("级别: 错误", text)
+
     def test_summary_keeps_warning_count_only_when_disabled(self):
         entry = StageLogEntry(
             stage="sen",

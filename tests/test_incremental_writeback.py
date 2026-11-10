@@ -348,7 +348,7 @@ class TestSenCheckpointWriteback(unittest.TestCase):
 
 
 class TestSenPreflight(unittest.TestCase):
-    """sen 前置校验：表头之外还要求报告学号已存在于 result 表，避免白跑 LLM。"""
+    """sen 前置校验：表头不匹配仍报错退出；缺行报告记错误跳过、其余继续评分。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -370,24 +370,41 @@ class TestSenPreflight(unittest.TestCase):
             } for report in reports
         }, mode="upsert")
 
-    def test_missing_student_ids_abort_before_llm(self):
+    def test_missing_student_ids_skipped_while_others_graded(self):
+        """缺行报告记错误跳过（不退出），其余报告继续 LLM 评分并写回。"""
         reports = [_md_report(sid) for sid in ("2021001", "2021002", "2021003")]
         self._seed(self.result_path, reports[:2], self.rules)  # 第三份在 result 表里没有行
 
-        grader = Grader(_config(batch=2))
-        grader._load_reports_for_pic = lambda *args, **kwargs: list(reports)
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
-                patch("gradehelper.grader.LLMClient") as client_cls:
-            with self.assertRaises(RuntimeError) as ctx:
-                grader.stage_sen(self.tmp, self.template, output=self.result_path,
-                                 skip_images=0)
+        graded: list[str] = []
 
-        client_cls.assert_not_called()  # 一个 LLM 请求都没发
-        message = str(ctx.exception)
-        self.assertIn("学号不在结果文件", message)
-        self.assertIn("2021003", message)
-        # 结果文件未被改写，也没有残留临时文件
-        self.assertEqual(set(read_result_items(self.result_path)), {"2021001", "2021002"})
+        def fake_grade(_client, report, _llm_rules):
+            graded.append(report.student_id)
+            return {"event": ItemScore(key="event", score=11.0, confidence=0.9)}
+
+        grader = Grader(_config(batch=2))
+        grader._log_path = self.tmp / "run.log"
+        grader._load_reports_for_pic = lambda *args, **kwargs: list(reports)
+        grader._grade_with_llm_batch = fake_grade
+        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+            out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
+                                   skip_images=0)
+
+        # 不抛异常；缺行的 2021003 不提交 LLM，其余两份正常评分写回
+        self.assertEqual(out, self.result_path)
+        self.assertEqual(set(graded), {"2021001", "2021002"})
+        items = read_result_items(self.result_path)
+        self.assertEqual(set(items), {"2021001", "2021002"})
+        self.assertEqual(items["2021001"]["event"].score, 11.0)
+        self.assertEqual(items["2021002"]["event"].score, 11.0)
+        # 错误信息写入运行日志，阶段总结标记失败份数
+        log_text = grader._log_path.read_text(encoding="utf-8")
+        self.assertIn("学号不在结果文件 result 表中", log_text)
+        self.assertIn("2021003", log_text)
+        entry = grader.stage_logs[-1]
+        self.assertEqual(entry.failed_count, 1)
+        self.assertEqual(entry.extra.get("学号缺失"), "1 份（不在 result 表，已跳过）")
+        self.assertEqual(entry.extra.get("报告"), "处理 3 份 / 成功 2 份 / 失败 1 份")
+        # 结果文件未新增 2021003 行，也没有残留临时文件
         self.assertEqual(list(self.tmp.glob("*.tmp*")), [])
 
     def test_no_llm_rules_skips_result_rewrite(self):

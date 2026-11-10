@@ -86,8 +86,11 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
                     except LLMAborted:
                         raise  # 用户取消：不吞，向上传播
                     except Exception as exc:  # noqa: BLE001 单张失败不影响其他图片
-                        logger.error("图片识别失败 %s P%d: %s", report.base_name, image.index, exc)
-                        if on_error is not None:
+                        # 有 on_error 时由调用方统一记录（运行日志 + 控制台）
+                        if on_error is None:
+                            logger.error("图片识别失败 %s P%d: %s",
+                                         report.base_name, image.index, exc)
+                        else:
                             try:
                                 on_error(report, image, exc)
                             except Exception:  # noqa: BLE001 记录失败不应影响其他图片

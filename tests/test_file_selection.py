@@ -430,8 +430,8 @@ class TestSenSpecifiedFiles(unittest.TestCase):
         self.assertIn("模式: 指定增量", log_text)
         self.assertRegex(log_text, r"运行开始: [^\n]*\n模式: 指定增量")
 
-    def test_specified_incremental_without_result_row_still_errors(self):
-        """名单内文件在结果表中没有行：保持现有前置校验（提示先跑 doc）。"""
+    def test_specified_incremental_without_result_row_skips_without_llm(self):
+        """名单内文件在结果表中没有行：记录错误并跳过，不提交 LLM、不退出。"""
         write_results(self.result_path, [self.reports[0]], self.rules,
                       {"2021001": self._scored()}, mode="upsert")
 
@@ -444,11 +444,17 @@ class TestSenSpecifiedFiles(unittest.TestCase):
             "学号不在结果表时不应提交 LLM 请求")
 
         with patch("gradehelper.grader.read_rules", return_value=self.rules):
-            with self.assertRaises(RuntimeError) as ctx:
-                grader.stage_sen(self.tmp, self.template, output=self.result_path,
-                                 skip_images=0)
+            out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
+                                   skip_images=0)
 
-        self.assertIn("学号不在结果文件 result 表中", str(ctx.exception))
+        # 不再抛异常退出；缺行报告记为失败并提示先跑 doc
+        self.assertEqual(out, self.result_path)
+        log_text = grader._log_path.read_text(encoding="utf-8")
+        self.assertIn("学号不在结果文件 result 表中", log_text)
+        self.assertIn("2021002", log_text)
+        entry = grader.stage_logs[-1]
+        self.assertEqual(entry.failed_count, 1)
+        self.assertEqual(entry.extra.get("学号缺失"), "1 份（不在 result 表，已跳过）")
 
     def test_unmatched_names_raise_before_grading(self):
         self._seed({sid: self._unscored() for sid in
