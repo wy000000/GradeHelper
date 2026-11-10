@@ -87,8 +87,15 @@ SECTION_PREFIX = re.compile(
     r")"
 )
 CATALOGUE_LINE = re.compile(r"目录(?:[（(][^）)]*[)）])?[:：]?")
-REFERENCE_LINE = re.compile(
-    r"(?:参考文献|参考资料|references?|bibliography|workscited)"
+# “参考文献”类：命中给该项满分
+REFERENCE_FULL = re.compile(
+    r"(?:参考文献|references?|bibliography|workscited)"
+    r"(?:[（(][^）)]*[)）])?[:：]?",
+    re.IGNORECASE,
+)
+# “参考论文”“参考资料”类：命中仅给 50% 分数
+REFERENCE_HALF = re.compile(
+    r"(?:参考论文|参考资料)"
     r"(?:[（(][^）)]*[)）])?[:：]?",
     re.IGNORECASE,
 )
@@ -97,24 +104,50 @@ REFERENCE_LINE = re.compile(
 def has_catalogue(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     """包含目录：报告前半部分存在单独成段/成行的“目录”。
 
+    “目录”以标题形式出现给该项满分；非标题形式但独行出现给 70%。
     忽略行首尾及字符间的 1 个或多个空格（含全角空格），不要求标题或列表格式。
     """
     text = report.md_text
     half = max(1, len(text) // 2)
     offset = 0
+    base_score = rule.default_numeric() or 0.0
+    best_score = 0.0
+    best_is_title = False
     for raw_line in text.splitlines(keepends=True):
         if offset >= half:
             break
-        if _is_catalogue_line(raw_line):
-            score = rule.default_numeric() or 0.0
-            return score, rule.comment or f"报告包含目录，+{score:g}分。"
+        is_catalogue, is_title = _catalogue_line_info(raw_line)
+        if not is_catalogue:
+            offset += len(raw_line)
+            continue
+        multiplier = 1.0 if is_title else 0.7
+        score = base_score * multiplier
+        if score > best_score:
+            best_score = score
+            best_is_title = is_title
         offset += len(raw_line)
-    return 0.0, "报告未检测到目录，不加分。"
+    if best_score > 0:
+        best_score = round(best_score, 2)
+        if best_is_title:
+            comment = rule.comment or f"报告包含目录章节，+{best_score:g}分。"
+        else:
+            comment = rule.comment or f"报告包含目录（非标题形式），+{best_score:g}分。"
+        return best_score, comment
+    return 0.0, "报告未检测到目录章节，不加分。"
 
 
-def _is_catalogue_line(raw_line: str) -> bool:
-    """判断一行是否为单独的“目录”（忽略标题/列表标记、强调符和空白）。"""
-    return bool(CATALOGUE_LINE.fullmatch(_normalise_title_line(raw_line)))
+def _catalogue_line_info(raw_line: str) -> tuple[bool, bool]:
+    """判断一行是否为单独的“目录”及其是否为标题形式。
+
+    返回 (is_catalogue, is_title)：
+    - is_catalogue: 行文去掉标记/空白后是否为“目录”
+    - is_title: 是否为标题形式（Markdown 标题或带章节编号/列表标记的前缀）
+    忽略标题/列表标记、强调符和空白。
+    """
+    is_catalogue = bool(CATALOGUE_LINE.fullmatch(_normalise_title_line(raw_line)))
+    if not is_catalogue:
+        return False, False
+    return True, _is_title_line(raw_line)
 
 
 def _plain_text(line: str) -> str:
@@ -131,19 +164,76 @@ def _normalise_title_line(raw_line: str) -> str:
     return re.sub(r"\s+", "", line)
 
 
-def _is_reference_line(raw_line: str) -> bool:
-    """判断一行是否为单独的“参考文献”（忽略标题/列表标记、强调符和空白）。"""
-    return bool(REFERENCE_LINE.fullmatch(_normalise_title_line(raw_line)))
+def _is_title_line(raw_line: str) -> bool:
+    """判断一行是否为标题形式。
+
+    标题形式包括：Markdown 一级至六级标题（# ## 等），或
+    带章节编号/列表标记的前缀（如 六、 / 1. / - / * 等）。
+    """
+    stripped = raw_line.strip()
+    if not stripped:
+        return False
+    if re.match(r"^#{1,6}\s", stripped):
+        return True
+    if SECTION_PREFIX.match(stripped):
+        return True
+    return False
+
+
+def _reference_line_info(raw_line: str) -> tuple[str | None, bool]:
+    """判断单独成行的参考文献类章节及其是否为标题形式。
+
+    返回 (kind, is_title)：
+    - kind: "full" 表示“参考文献”等；"half" 表示“参考论文”“参考资料”；None 表示不匹配
+    - is_title: 是否为标题形式
+    忽略标题/列表标记、强调符和空白。
+    """
+    norm = _normalise_title_line(raw_line)
+    if REFERENCE_FULL.fullmatch(norm):
+        kind = "full"
+    elif REFERENCE_HALF.fullmatch(norm):
+        kind = "half"
+    else:
+        return None, False
+    return kind, _is_title_line(raw_line)
 
 
 def has_reference(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     """包含参考文献：全文存在单独成段/成行的“参考文献”。
 
+    “参考文献”以标题形式出现给该项满分；非标题形式但独行出现给 70%。
+    “参考论文”“参考资料”再在此基础上乘 70%（标题形式 70%、非标题形式 49%）。
+    全文取最高分；若未检测到，不加分。
     忽略行首尾及字符间的 1 个或多个空格（含全角空格），不要求标题或列表格式。
     """
+    base_score = rule.default_numeric() or 0.0
+    best_score = 0.0
+    best_kind: str | None = None
+    best_is_title = False
     for line in report.md_text.splitlines():
-        if _is_reference_line(line):
-            score = rule.default_numeric() or 0.0
-            return score, rule.comment or f"报告包含参考文献，+{score:g}分。"
+        kind, is_title = _reference_line_info(line)
+        if kind is None:
+            continue
+        multiplier = 1.0 if is_title else 0.7
+        if kind == "half":
+            multiplier *= 0.7
+        score = base_score * multiplier
+        if score > best_score:
+            best_score = score
+            best_kind = kind
+            best_is_title = is_title
+    if best_score > 0:
+        best_score = round(best_score, 2)
+        if best_kind == "full":
+            if best_is_title:
+                comment = rule.comment or f"报告包含参考文献章节，+{best_score:g}分。"
+            else:
+                comment = rule.comment or f"报告包含参考文献（非标题形式），+{best_score:g}分。"
+        else:
+            if best_is_title:
+                comment = rule.comment or f"报告包含参考论文/参考资料章节，+{best_score:g}分。"
+            else:
+                comment = rule.comment or f"报告包含参考论文/参考资料（非标题形式），+{best_score:g}分。"
+        return best_score, comment
     return 0.0, "报告未检测到参考文献章节，不加分。"
 

@@ -167,7 +167,7 @@ class TestStructureRules(unittest.TestCase):
     def test_has_catalogue_plain_title_with_tab_entries(self):
         rule = make_rule("hasCatalogue", "2")
         md = "封面\n\n目录\n一、概述\t1\n二、分析\t3\n三、总结\t5\n\n## 正文\n正文"
-        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 1.4)
 
     def test_has_catalogue_without_title_not_counted(self):
         # 只有目录条目、没有单独的“目录”行时不加分
@@ -180,27 +180,33 @@ class TestStructureRules(unittest.TestCase):
         md = ("封面\n\n目    录\n"
               "#### 一、事件概述\t2\n#### 1.1 事件经过\t2\n#### 二、问题原因\t4\n\n"
               "## 一、事件概述\n正文")
-        self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0)
+        self.assertEqual(has_catalogue(make_report(md), rule)[0], 1.4)
 
     def test_has_catalogue_title_alone_counts(self):
         # “目录”单独成行即可，不要求下面有目录内容
         rule = make_rule("hasCatalogue", "2")
-        for md in ("# 报告\n\n## 目录\n\n## 正文\n正文内容",
-                   "# 报告\n\n目录\n\n## 正文\n正文内容",
-                   "封面\n\n## 目录\n"):
-            self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0, msg=md)
+        cases = (
+            ("# 报告\n\n## 目录\n\n## 正文\n正文内容", 2.0),
+            ("# 报告\n\n目录\n\n## 正文\n正文内容", 1.4),
+            ("封面\n\n## 目录\n", 2.0),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_catalogue(make_report(md), rule)[0], expected, msg=md)
 
     def test_has_catalogue_ignores_spaces_and_format(self):
         rule = make_rule("hasCatalogue", "2")
-        for md in ("封面\n\n- 目录\n正文",
-                   "封面\n\n**目录**\n正文",
-                   "封面\n\n目录：\n正文",
-                   "封面\n\n目录（Contents）\n正文",
-                   "封面\n\n一、目 录\n正文",
-                   "封面\n\n1. 目\u3000录\n正文",
-                   "封面\n\n  目  录 \n正文",
-                   "封面\n\n\u3000目\u3000\u3000录\u3000\n正文"):
-            self.assertEqual(has_catalogue(make_report(md), rule)[0], 2.0, msg=md)
+        cases = (
+            ("封面\n\n- 目录\n正文", 2.0),
+            ("封面\n\n**目录**\n正文", 2.0),
+            ("封面\n\n目录：\n正文", 1.4),
+            ("封面\n\n目录（Contents）\n正文", 1.4),
+            ("封面\n\n一、目 录\n正文", 2.0),
+            ("封面\n\n1. 目\u3000录\n正文", 2.0),
+            ("封面\n\n  目  录 \n正文", 1.4),
+            ("封面\n\n\u3000目\u3000\u3000录\u3000\n正文", 1.4),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_catalogue(make_report(md), rule)[0], expected, msg=md)
 
     def test_has_catalogue_requires_standalone_line(self):
         rule = make_rule("hasCatalogue", "2")
@@ -219,9 +225,14 @@ class TestStructureRules(unittest.TestCase):
 
     def test_has_reference_plain_and_numbered_title(self):
         rule = make_rule("hasReference", "2")
-        for md in ("正文\n\n**参考文献**\n[1] 文献一", "正文\n\n六、参考文献\n[1] 文献一",
-                   "正文\n\nReferences\n[1] A paper", "正文\n\n参考文献：\n[1] 文献一"):
-            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+        cases = (
+            ("正文\n\n**参考文献**\n[1] 文献一", 2.0),
+            ("正文\n\n六、参考文献\n[1] 文献一", 2.0),
+            ("正文\n\nReferences\n[1] A paper", 1.4),
+            ("正文\n\n参考文献：\n[1] 文献一", 1.4),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected, msg=md)
 
     def test_has_reference_score_comes_from_rule_default(self):
         md = "正文\n\n## 参考文献\n[1] 文献一"
@@ -233,26 +244,33 @@ class TestStructureRules(unittest.TestCase):
     def test_has_reference_title_alone_counts(self):
         # “参考文献”单独成行即可，不要求下面有内容
         rule = make_rule("hasReference", "2")
-        for md in ("正文\n\n## 参考文献", "正文\n\n## 参考文献\n\n",
-                   "正文\n\n## 参考文献\n\n## 附录\n附录内容",
-                   "正文\n\n参考文献：\n\n"):
-            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+        cases = (
+            ("正文\n\n## 参考文献", 2.0),
+            ("正文\n\n## 参考文献\n\n", 2.0),
+            ("正文\n\n## 参考文献\n\n## 附录\n附录内容", 2.0),
+            ("正文\n\n参考文献：\n\n", 1.4),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected, msg=md)
 
     def test_has_reference_ignores_spaces_and_format(self):
         rule = make_rule("hasReference", "2")
-        for md in ("正文\n\n- 参考文献\n[1] 文献一",
-                   "正文\n\n**参考文献**\n[1] 文献一",
-                   "正文\n\n一、参 考 文 献\n[1] 文献一",
-                   "正文\n\n1. 参\u3000考\u3000文\u3000献\n[1] 文献一",
-                   "正文\n\n  参  考  文  献 \n[1] 文献一",
-                   "正文\n\n\u3000参\u3000\u3000考\u3000文\u3000\u3000献\u3000\n[1] 文献一"):
-            self.assertEqual(has_reference(make_report(md), rule)[0], 2.0, msg=md)
+        cases = (
+            ("正文\n\n- 参考文献\n[1] 文献一", 2.0),
+            ("正文\n\n**参考文献**\n[1] 文献一", 2.0),
+            ("正文\n\n一、参 考 文 献\n[1] 文献一", 2.0),
+            ("正文\n\n1. 参\u3000考\u3000文\u3000献\n[1] 文献一", 2.0),
+            ("正文\n\n  参  考  文  献 \n[1] 文献一", 1.4),
+            ("正文\n\n\u3000参\u3000\u3000考\u3000文\u3000\u3000献\u3000\n[1] 文献一", 1.4),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected, msg=md)
 
     def test_has_reference_anywhere_in_text(self):
         # 全文任意位置出现“参考文献”行都算
         rule = make_rule("hasReference", "2")
         md = "正文" * 200 + "\n参考文献\n" + "正文" * 100
-        self.assertEqual(has_reference(make_report(md), rule)[0], 2.0)
+        self.assertEqual(has_reference(make_report(md), rule)[0], 1.4)
 
     def test_has_reference_requires_standalone_line(self):
         rule = make_rule("hasReference", "2")
@@ -263,6 +281,41 @@ class TestStructureRules(unittest.TestCase):
         rule = make_rule("hasReference", "2")
         for md in ("没有参考文献的正文", "本文参考文献将在后续补充。",
                    "参考文献......12\n正文"):
+            self.assertEqual(has_reference(make_report(md), rule)[0], 0.0, msg=md)
+
+
+    def test_has_reference_half_score(self):
+        # “参考论文”“参考资料”按相同逻辑判断，但只加 50% 分数
+        rule = make_rule("hasReference", "2")
+        cases = (
+            ("正文\n\n## 参考论文\n[1] 文献一", 1.4),
+            ("正文\n\n## 参考资料\n[1] 文献一", 1.4),
+            ("正文\n\n**参考论文**\n[1] 文献一", 1.4),
+            ("正文\n\n参考资料：\n[1] 文献一", 0.98),
+            ("正文\n\n  参  考  论  文  \n[1] 文献一", 0.98),
+            ("正文\n\n\u3000参\u3000\u3000考\u3000资料\u3000\u3000\n[1] 文献一", 0.98),
+        )
+        for md, expected in cases:
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected, msg=md)
+
+    def test_has_reference_half_score_from_default(self):
+        md = "正文\n\n## 参考论文\n[1] 文献一"
+        for default, expected in (("2", 1.4), ("5", 3.5), ("3.5", 2.45)):
+            rule = make_rule("hasReference", default)
+            self.assertEqual(has_reference(make_report(md), rule)[0], expected,
+                             msg=f"默认值 {default}")
+
+    def test_has_reference_full_wins_over_half(self):
+        rule = make_rule("hasReference", "2")
+        md = "正文\n\n## 参考论文\n\n## 参考文献\n[1] 文献一"
+        self.assertEqual(has_reference(make_report(md), rule)[0], 2.0)
+        md = "正文\n\n## 参考文献\n\n## 参考资料\n[1] 文献一"
+        self.assertEqual(has_reference(make_report(md), rule)[0], 2.0)
+
+    def test_has_reference_half_requires_standalone_line(self):
+        rule = make_rule("hasReference", "2")
+        for md in ("参考论文如下\n[1] 文献一", "参考资料......12\n正文",
+                   "本文参考资料将在后续补充。"):
             self.assertEqual(has_reference(make_report(md), rule)[0], 0.0, msg=md)
 
 
