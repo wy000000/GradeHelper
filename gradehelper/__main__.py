@@ -51,14 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
     incremental = False
     # incremental = True
     skip_images = 2
-    # 只更新指定的报告文件（主名或完整文件名）；none 表示处理目录内全部文件
+    # 只更新指定的报告文件（主名或完整文件名）；none 表示处理目录内全部文件。
+    # 名单非空时，增量/全量只对名单内文件有效；日志用「模式」记录
+    # 全部全量 / 全部增量 / 指定全量 / 指定增量。
     files = ["none"]
 
-    '''请增加一个启动参数，传入文件名称列表，默认为none，更新列表中的文件。对三阶段均有效。
-当文件列表不空时，增量、全量只对列表中的文件有效。当列表空时，增量、全量对所有文件有效。
-log中不再记：增量模式: 开启或关闭，改为 模式：全部全量、全部增量、指定全量、指定增量。'''
-
-    
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
                         help="显示版本号并退出")

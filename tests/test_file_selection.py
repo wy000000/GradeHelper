@@ -1,4 +1,4 @@
-"""指定文件�?-files）测试：名单解析、三阶段筛选与「模式」日志�?""
+"""指定文件（--files）测试：名单解析、三阶段筛选与「模式」日志。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from gradehelper.models import ItemScore, ParsedReport, RuleItem  # noqa: E402
 from gradehelper.parser import normalize_file_names, select_paths  # noqa: E402
 
 NAME_FORMAT = "{course}-{klass}-{student_id}-{stdName}-{reportName}"
-BASE = "云安�?安全2401-{sid}-张三-课程报告"
+BASE = "云安全-安全2401-{sid}-张三-课程报告"
 IMAGE_CONTEXT = "[图片描述 P{n}: {caption}]"
 
 
@@ -49,7 +49,7 @@ def _docx(tmp: Path, sid: str) -> Path:
 def _rules() -> list[RuleItem]:
     return [
         RuleItem(key="baseScore", default="25", weight=1.0, method="code",
-                 evaluation="", comment="报告已提交，+25�?),
+                 evaluation="", comment="报告已提交，+25分"),
         RuleItem(key="event", default="0-15", weight=0.15, method="LLM",
                  evaluation="事件描述", comment=""),
         RuleItem(key="eventCause", default="0-15", weight=0.15, method="LLM",
@@ -59,7 +59,7 @@ def _rules() -> list[RuleItem]:
 
 def _report(tmp: Path, sid: str) -> ParsedReport:
     return ParsedReport(
-        course="云安�?, klass="安全2401", student_id=sid, std_name="张三",
+        course="云安全", klass="安全2401", student_id=sid, std_name="张三",
         report_name="课程报告", source_path=str(tmp / f"{BASE.format(sid=sid)}.md"),
         md_text="正文",
     )
@@ -89,30 +89,30 @@ class TestNormalizeFileNames(unittest.TestCase):
 
 class TestSelectPaths(unittest.TestCase):
     def test_matches_stem_full_name_and_ignores_case(self):
-        paths = [Path("dir/云安�?2021001-张三-课程报告.docx"),
-                 Path("dir/云安�?2021002-李四-课程报告.docx")]
+        paths = [Path("dir/云安全-2021001-张三-课程报告.docx"),
+                 Path("dir/云安全-2021002-李四-课程报告.docx")]
         matched, unmatched = select_paths(
-            paths, ["云安�?2021001-张三-课程报告"])
+            paths, ["云安全-2021001-张三-课程报告"])
         self.assertEqual(matched, [paths[0]])
         self.assertEqual(unmatched, [])
 
         matched, unmatched = select_paths(
-            paths, ["云安�?2021002-李四-课程报告.DOCX".lower()])
+            paths, ["云安全-2021002-李四-课程报告.docx".lower()])
         self.assertEqual(matched, [paths[1]])
 
-        matched, unmatched = select_paths(paths, ["不存�?])
+        matched, unmatched = select_paths(paths, ["不存在的文件"])
         self.assertEqual(matched, [])
-        self.assertEqual(unmatched, ["不存�?])
+        self.assertEqual(unmatched, ["不存在的文件"])
 
     def test_empty_names_returns_all(self):
         paths = [Path("a.docx"), Path("b.docx")]
         self.assertEqual(select_paths(paths, []), (paths, []))
 
     def test_full_docx_name_matches_same_stem_md(self):
-        """名单写完�?.docx 名时，pic/sen 的同�?.md 也应命中�?""
-        paths = [Path("dir/云安�?2021001-张三-课程报告.md")]
+        """名单写完档 .docx 名时，pic/sen 的同名 .md 也应命中。"""
+        paths = [Path("dir/云安全-2021001-张三-课程报告.md")]
         matched, unmatched = select_paths(
-            paths, ["云安�?2021001-张三-课程报告.docx"])
+            paths, ["云安全-2021001-张三-课程报告.docx"])
         self.assertEqual(matched, paths)
         self.assertEqual(unmatched, [])
 
@@ -125,9 +125,9 @@ class TestModeLabel(unittest.TestCase):
         self.assertEqual(_run_mode_label(True, ["a"]), "指定增量")
 
     def test_files_label(self):
-        self.assertEqual(_files_label(["a", "b"]), "2 个（a、b�?)
+        self.assertEqual(_files_label(["a", "b"]), "2 个（a、b）")
         self.assertEqual(_files_label([f"f{i}" for i in range(12)]),
-                         "12 个（f0、f1、f2、f3、f4、f5、f6、f7、f8、f9 �?12 个）")
+                         "12 个（f0、f1、f2、f3、f4、f5、f6、f7、f8、f9 等 12 个）")
 
 
 class TestFilesArgument(unittest.TestCase):
@@ -153,7 +153,7 @@ class TestFilesArgument(unittest.TestCase):
 
 
 class TestDocSpecifiedFiles(unittest.TestCase):
-    """doc 阶段：名单收窄处理范围，增量判定仍以结果表学号记录为准�?""
+    """doc 阶段：名单收窄处理范围，增量判定仍以结果表学号记录为准。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -217,12 +217,12 @@ class TestDocSpecifiedFiles(unittest.TestCase):
             grader, [_report(self.tmp, "2021002")])
 
         self.assertEqual(out, self.result_path)
-        # 名单收窄�?2021001/2021002，其�?2021001 已有记录 �?只解�?2021002
+        # 名单收窄到 2021001/2021002，其中 2021001 已有记录 → 只解析 2021002
         self.assertEqual(parse_mock.call_args.kwargs["paths"], [pending])
         rules_mock.assert_called_once()
         write_mock.assert_called_once()
         entry = grader.stage_logs[-1]
-        self.assertEqual(entry.extra.get("增量跳过"), "1 个结果文件中已有记录的文�?)
+        self.assertEqual(entry.extra.get("增量跳过"), "1 个结果文件中已有记录的文档")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定增量", log_text)
 
@@ -249,7 +249,7 @@ class TestDocSpecifiedFiles(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 grader.stage_doc(self.tmp, self.template, output=self.result_path)
 
-        self.assertIn("指定的文件在报告目录中没有找�?, str(ctx.exception))
+        self.assertIn("指定的文件在报告目录中没有找到", str(ctx.exception))
         parse_mock.assert_not_called()
 
 
@@ -324,7 +324,7 @@ class TestPicSpecifiedFiles(unittest.TestCase):
 
 
 class TestSenSpecifiedFiles(unittest.TestCase):
-    """sen 指定增量：名单收窄范围，是否评分仍看结果表中 LLM 项是否为空�?""
+    """sen 指定增量：名单收窄范围，是否评分仍看结果表中 LLM 项是否为空。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -371,7 +371,7 @@ class TestSenSpecifiedFiles(unittest.TestCase):
             }
 
         grader = Grader(_config())
-        # 名单�?doc 阶段的完�?.docx 名，sen 阶段按主名命中同�?.md
+        # 名单写 doc 阶段的完整 .docx 名，sen 阶段按主名命中同名 .md
         grader.files = [BASE.format(sid="2021002") + ".docx"]
         grader._log_path = self.tmp / "run.log"
         grader._load_reports_for_pic = lambda *args, **kwargs: list(self.reports)
@@ -413,15 +413,15 @@ class TestSenSpecifiedFiles(unittest.TestCase):
                                    skip_images=0)
 
         self.assertEqual(out, self.result_path)
-        # 名单�?2021001/2021002�?021001 已评�?�?只评�?2021002
+        # 名单内 2021001/2021002；2021001 已评分 → 只评分 2021002
         self.assertEqual(graded, ["2021002"])
         entry = grader.stage_logs[-1]
-        self.assertEqual(entry.extra.get("增量跳过"), "1 �?LLM 项已评分报告")
+        self.assertEqual(entry.extra.get("增量跳过"), "1 份 LLM 项已评分报告")
         log_text = grader._log_path.read_text(encoding="utf-8")
         self.assertIn("模式: 指定增量", log_text)
 
     def test_specified_incremental_without_result_row_still_errors(self):
-        """名单内文件在结果表中没有行：保持现有前置校验（提示先�?doc）�?""
+        """名单内文件在结果表中没有行：保持现有前置校验（提示先跑 doc）。"""
         write_results(self.result_path, [self.reports[0]], self.rules,
                       {"2021001": self._scored()}, mode="upsert")
 
