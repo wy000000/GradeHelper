@@ -642,7 +642,7 @@ class TestStageStartAndEvent(unittest.TestCase):
             end_dt=datetime(2026, 11, 3, 10, 0, 1),
             elapsed=1.0, error=None,
             extra={"并发": "4 线程", "跳过图片": "前 2 张",
-                   "图片": "解析 1 张 / 保留 1 张"},
+                   "图片": "解析 1 张 / 跳过前 2 张 / 保留 1 张"},
             reports_dir=self.tmp, template="模板.xlsx", output="结果.xlsx",
         )
         self.grader._append_stage_log(entry)
@@ -663,7 +663,7 @@ class TestStageStartAndEvent(unittest.TestCase):
         self.assertNotIn("记录时间:", text)
         self.assertNotIn("状态: 开始", text)
         # 阶段结果里的信息仍保留
-        self.assertIn("图片: 解析 1 张 / 保留 1 张", text)
+        self.assertIn("图片: 解析 1 张 / 跳过前 2 张 / 保留 1 张", text)
 
     def test_events_are_appended_in_time_order(self):
         self.grader._append_stage_event(

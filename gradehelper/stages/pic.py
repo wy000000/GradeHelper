@@ -1,4 +1,4 @@
-"""阶段 pic：vllm 图片识别并回写 md。"""
+"""阶段 pic / pic-e：vllm 图片识别并回写 md。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..excel_io import read_rules
-from ..image_caption import caption_images, save_caption_txt
+from ..image_caption import caption_images, load_caption_txt, save_caption_txt
 from ..models import ParsedReport, ReportImage
 from ..parser import embed_captions, has_image_caption
 from ..run_log import append_failure_detail, format_duration
@@ -16,19 +16,39 @@ from .common import _files_label, _run_mode_label, _select_reports, logger
 
 
 class PicStageMixin:
-    """阶段 pic（vllm 识图 + 回写 md）的实现。
+    """阶段 pic / pic-e（vllm 识图 + 回写 md）的实现。
 
+    pic-e 会先复用图片描述 txt，缺失的图片再交给 vllm。
     宿主类需提供 ``config`` / ``incremental`` / ``files`` / ``cancel_token``，
     以及报告加载和运行日志（RunLogMixin）能力。
     """
 
     def stage_pic(self, reports_dir: str | Path, template: str | Path,
                   skip_images: int = 2, tag_dep: str = "系部专业") -> None:
-        """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。
+        """阶段 pic：vllm 识别所有图片，将描述嵌入 md 文档并落盘。"""
+        self._run_pic_stage(reports_dir, template, skip_images, tag_dep,
+                            reuse_txt=False)
+
+    def stage_pic_e(self, reports_dir: str | Path, template: str | Path,
+                    skip_images: int = 2, tag_dep: str = "系部专业") -> None:
+        """阶段 pic-e：优先复用图片描述 txt，缺失的图片再交给 vllm 识别。
+
+        与 pic 的唯一区别：识图前先按「{base_name}-P{n}.txt」查找已有描述
+        （``paths.captions_dir`` 为空时与 md 同目录），有内容就直接嵌入 md；
+        找不到、内容为空或读取失败时才把该图片交给 vllm。
+        """
+        self._run_pic_stage(reports_dir, template, skip_images, tag_dep,
+                            reuse_txt=True)
+
+    def _run_pic_stage(self, reports_dir: str | Path, template: str | Path,
+                       skip_images: int, tag_dep: str, *,
+                       reuse_txt: bool) -> None:
+        """pic / pic-e 的共同实现；``reuse_txt`` 控制是否先复用描述 txt。
 
         运行日志按时序记录：开始的配置信息 → 处理过程中的出错/报警信息（保留文档名
         与出错内容）→ 结束时的阶段总结（最终未成功文档只在总结里列出）。
         """
+        stage_name = "pic-e" if reuse_txt else "pic"
         cfg = self.config
         reports_dir = Path(reports_dir)
         t0 = time.perf_counter()
@@ -43,6 +63,8 @@ class PicStageMixin:
         # 增量模式：因 md 中已有描述而跳过的图片/报告数
         skipped_caption_images = 0
         skipped_caption_reports = 0
+        # pic-e 模式：复用已有描述 txt 的图片数
+        reused_txt_images = 0
         warnings_log: list[str] = []
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
@@ -61,7 +83,7 @@ class PicStageMixin:
             """
             if count:
                 warnings_log.append(message)
-            self._append_stage_event(stage="pic", level=level, message=message)
+            self._append_stage_event(stage=stage_name, level=level, message=message)
 
         # 最终异常（重试后仍失败）：按 md 文件句柄归属
         caption_errors: dict[tuple[str, int], str] = {}
@@ -108,7 +130,7 @@ class PicStageMixin:
             raw = getattr(exc, "raw_text", None)
             if raw:
                 append_failure_detail(
-                    "pic", report,
+                    stage_name, report,
                     f"{report.base_name}-P{image.index}: JSON 解析错误:"
                     f"{reason}\n完整原文:\n{raw}")
 
@@ -134,11 +156,9 @@ class PicStageMixin:
                 txt_errors[item_key] = str(exc) or exc.__class__.__name__
                 saved_txt_keys.discard(item_key)
 
-        def _save_report(report: ParsedReport) -> None:
-            """保存一份报告的全部图片描述与 md；失败只记录，不中断其它报告。"""
+        def _save_md(report: ParsedReport) -> None:
+            """回写一份报告的 md；失败只记录，不中断其它报告。"""
             key = _report_key(report)
-            for image in report.images:
-                _save_caption(report, image)
             try:
                 _embed_and_save_md(report)
             except Exception as exc:  # noqa: BLE001 写盘失败只记录，不中断识图
@@ -148,23 +168,26 @@ class PicStageMixin:
                 md_errors.pop(key, None)
                 saved_md_keys.add(key)
 
+        def _save_report(report: ParsedReport) -> None:
+            """保存一份报告的全部图片描述与 md；失败只记录，不中断其它报告。"""
+            for image in report.images:
+                _save_caption(report, image)
+            _save_md(report)
+
         def _on_caption_batch(items: list[tuple[ParsedReport, ReportImage]]) -> None:
             """按 vllm_workers 实时回写：图片描述 txt + 涉及的 md，无需等整阶段结束。"""
             touched: dict[str, ParsedReport] = {}
             for report, image in items:
-                _save_caption(report, image)
-                touched[_report_key(report)] = report
+                key = _report_key(report)
+                # pic-e 传入的是只含待识别图片的副本：回写时要用原报告，
+                # 否则已复用 txt 的图片描述会在 md 中丢失
+                full_report = report_by_key.get(key, report)
+                _save_caption(full_report, image)
+                touched[key] = full_report
             for report in touched.values():
-                try:
-                    _embed_and_save_md(report)
-                except Exception as exc:  # noqa: BLE001 写盘失败只记录，不中断识图
-                    md_errors[_report_key(report)] = str(exc) or exc.__class__.__name__
-                    saved_md_keys.discard(_report_key(report))
-                else:
-                    md_errors.pop(_report_key(report), None)
-                    saved_md_keys.add(_report_key(report))
-            logger.debug("【阶段 pic】实时回写 %d 张图片描述（累计 %d 个 txt）",
-                         len(items), len(saved_txt_keys))
+                _save_md(report)
+            logger.debug("【阶段 %s】实时回写 %d 张图片描述（累计 %d 个 txt）",
+                         stage_name, len(items), len(saved_txt_keys))
 
         def _pending_keys() -> set[str]:
             keys = {key for key, _index in caption_errors}
@@ -184,7 +207,7 @@ class PicStageMixin:
             start_course, start_report_name = self._first_report_identity(
                 reports_dir, ".md", self.files)
             self._append_stage_start_entry(
-                stage="pic",
+                stage=stage_name,
                 course=start_course,
                 tag_dep=tag_dep,
                 report_name=start_report_name,
@@ -209,10 +232,10 @@ class PicStageMixin:
                     "警告",
                     "增量模式无法识别已有图片描述（prompts.image_context 缺少 {caption}），"
                     "将按全量识别")
-            logger.info("【阶段 pic】从已保存的 md 与图片加载报告: %s（并发 %d）",
-                        reports_dir, parse_workers)
+            logger.info("【阶段 %s】从已保存的 md 与图片加载报告: %s（并发 %d）",
+                        stage_name, reports_dir, parse_workers)
             reports = self._load_reports_for_pic(
-                reports_dir, skip_images, tag_dep=tag_dep,
+                reports_dir, skip_images, tag_dep=tag_dep, stage=stage_name,
                 on_error=_on_load_error, workers=parse_workers,
                 max_attempts=max_attempts, on_retry=_on_load_retry,
                 on_warning=lambda message: _record_event("警告", message))
@@ -245,24 +268,62 @@ class PicStageMixin:
                     _record_event("警告",
                                   f"{Path(report.source_path).name}: {warning}")
             if skipped_caption_images:
-                logger.info("【阶段 pic】增量模式：跳过 %d 张已有描述图片（%d 份报告），待识别 %d 张",
-                            skipped_caption_images, skipped_caption_reports,
+                logger.info("【阶段 %s】增量模式：跳过 %d 张已有描述图片（%d 份报告），待识别 %d 张",
+                            stage_name, skipped_caption_images, skipped_caption_reports,
                             sum(len(report.images) for report in reports))
 
+            if reuse_txt:
+                # pic-e：先复用图片描述 txt，缺失（或为空/读取失败）的图片再交给 vllm
+                touched: dict[str, ParsedReport] = {}
+                for report in reports:
+                    for image in report.images:
+                        if image.caption:
+                            continue
+                        try:
+                            caption = load_caption_txt(
+                                report, image, cfg.paths.captions_dir or None)
+                        except Exception as exc:  # noqa: BLE001 读取失败按缺失处理
+                            _record_event(
+                                "警告",
+                                f"{report.base_name}-P{image.index}: 读取描述 txt 失败，"
+                                f"将交给 vllm 识别: {str(exc) or exc.__class__.__name__}")
+                            continue
+                        if not caption:
+                            continue
+                        image.caption = caption
+                        reused_txt_images += 1
+                        touched[_report_key(report)] = report
+                for report in touched.values():
+                    _save_md(report)
+                if reused_txt_images:
+                    logger.info("【阶段 %s】复用 %d 张已有描述 txt，%d 张交给 vllm",
+                                stage_name, reused_txt_images,
+                                sum(1 for report in reports for image in report.images
+                                    if not image.caption))
+
             llm_rules_flag = any(r.is_llm for r in read_rules(template))
-            pending_image_count = sum(len(report.images) for report in reports)
+            # 只把仍缺描述的图片交给 vllm：pic-e 中已复用 txt 的图片不重复识别
+            pending_reports = [
+                replace(report, images=[image for image in report.images
+                                        if not image.caption])
+                for report in reports
+                if any(not image.caption for image in report.images)
+            ]
+            pending_image_count = sum(len(report.images) for report in pending_reports)
             if llm_rules_flag:
                 caption_enabled = True
                 if not pending_image_count:
-                    logger.info("【阶段 pic】%s",
+                    logger.info("【阶段 %s】%s", stage_name,
                                 "增量模式：所有图片均已有描述，无需识别"
-                                if self.incremental else "没有需要识别的图片")
+                                if self.incremental else
+                                ("所有图片均已复用描述 txt，无需调用 vllm"
+                                 if reuse_txt else "没有需要识别的图片"))
                 else:
-                    logger.info("【阶段 pic】vllm 批量识别图片（每 %d 张实时回写）",
-                                max(1, cfg.vllm.vllm_workers))
+                    logger.info("【阶段 %s】vllm 批量识别图片（每 %d 张实时回写）",
+                                stage_name, max(1, cfg.vllm.vllm_workers))
                     try:
                         caption_images(
-                            reports, cfg.vllm, cfg.prompts.image_prompt,
+                            pending_reports, cfg.vllm, cfg.prompts.image_prompt,
                             cancel=self.cancel_token, on_error=_on_caption_error,
                             on_batch=_on_caption_batch,
                         )
@@ -271,8 +332,8 @@ class PicStageMixin:
                         self.cancel()
                         for report in reports:
                             _save_report(report)
-                        logger.warning("【阶段 pic】已中断，已保存 %d 张已识别图片描述",
-                                       len(saved_txt_keys))
+                        logger.warning("【阶段 %s】已中断，已保存 %d 张已识别图片描述",
+                                       stage_name, len(saved_txt_keys))
                         raise
                     _clear_resolved_caption_errors(reports)
 
@@ -288,9 +349,9 @@ class PicStageMixin:
                         if not pending_reports:
                             break
                         logger.warning(
-                            "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件"
+                            "【阶段 %s】第 %d/%d 轮重试 %d 个异常文件"
                             "（并发降为 %d，缺失图片重新识别后覆盖保存）",
-                            retry + 1, max_attempts, len(pending_reports),
+                            stage_name, retry + 1, max_attempts, len(pending_reports),
                             retry_vllm.vllm_workers)
                         # 只把仍缺描述的图片交给 vllm，已成功的图片不重复识别
                         missing_reports = [
@@ -357,15 +418,16 @@ class PicStageMixin:
                     count=False)
 
             if caption_failed:
-                logger.error("【阶段 pic】%d 张图片重试后仍识别失败，可重跑 --stage pic 补齐",
-                             caption_failed)
+                logger.error("【阶段 %s】%d 张图片重试后仍识别失败，可重跑 --stage %s 补齐",
+                             stage_name, caption_failed, stage_name)
             if caption_write_failed or md_write_failed:
                 logger.error(
-                    "【阶段 pic】%d 张描述 / %d 份 md 写盘失败（其余已按批回写），"
-                    "可重跑 --stage pic 补齐",
-                    len(caption_write_failed), len(md_write_failed))
-            logger.info("【阶段 pic】完成，图片描述已嵌入 md 并落盘，耗时 %s",
-                        format_duration(time.perf_counter() - t0))
+                    "【阶段 %s】%d 张描述 / %d 份 md 写盘失败（其余已按批回写），"
+                    "可重跑 --stage %s 补齐",
+                    stage_name, len(caption_write_failed), len(md_write_failed),
+                    stage_name)
+            logger.info("【阶段 %s】完成，图片描述已嵌入 md 并落盘，耗时 %s",
+                        stage_name, format_duration(time.perf_counter() - t0))
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt，统一记录后原样抛出
             error = str(exc) or exc.__class__.__name__
             _record_event("错误", f"阶段中断: {error}", count=False)
@@ -389,6 +451,7 @@ class PicStageMixin:
             extra["base_url"] = cfg.vllm.base_url or "（未配置）"
             extra["model"] = str(cfg.vllm.get_model() or "（未配置）")
             extra["并发"] = f"{max(1, cfg.vllm.vllm_workers)} 线程"
+            caption_enabled = caption_enabled or bool(reused_txt_images)
             if caption_enabled:
                 img_failed = len(caption_errors) + len(txt_errors)
                 img_success = max(0, caption_done - len(txt_errors))
@@ -412,6 +475,10 @@ class PicStageMixin:
                 extra["加载失败"] = f"{load_failed} 个文档"
             if saved_txt:
                 extra["描述 txt"] = f"{saved_txt} 个"
+            if reuse_txt:
+                extra["描述来源"] = (
+                    f"复用 txt {reused_txt_images} 张 / "
+                    f"vllm {max(0, caption_done - reused_txt_images)} 张")
             if caption_write_failed or md_write_failed:
                 extra["写盘失败"] = (f"{len(caption_write_failed)} 张 txt / "
                                     f"{len(md_write_failed)} 份 md")
@@ -425,7 +492,7 @@ class PicStageMixin:
             if failed_documents:
                 extra["失败文档"] = "、".join(failed_documents)
             self._append_stage_log(self._build_stage_entry(
-                stage="pic",
+                stage=stage_name,
                 reports=reports,
                 tag_dep=tag_dep,
                 start_dt=start_dt,

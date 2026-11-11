@@ -9,10 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from unittest.mock import patch
+
 from gradehelper.config import PathsConfig, _normalize_document_suffixes  # noqa: E402
 from gradehelper.parser import (  # noqa: E402
     _materialize_mineru_images,
     _mineru_tier,
+    _quiet_mineru_logs,
 )
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png"
@@ -67,6 +70,18 @@ class TestMaterializeMineruImages(unittest.TestCase):
             self.assertEqual(parsed, [])
             self.assertNotIn("missing.png", text)
             self.assertTrue(any("读取 MinerU 图片失败" in w for w in warnings))
+
+
+class TestQuietMineruLogs(unittest.TestCase):
+    def test_suppresses_warning_but_keeps_error(self):
+        """doc 解析期间 loguru 只保留 ERROR，隐藏 docvortex 等非致命 WARNING。"""
+        with patch("loguru.logger.remove") as remove, \
+                patch("loguru.logger.add") as add:
+            with _quiet_mineru_logs():
+                pass
+        self.assertGreaterEqual(remove.call_count, 1)
+        levels = [call.kwargs.get("level") for call in add.call_args_list]
+        self.assertIn("ERROR", levels)
 
 
 class TestMineruTier(unittest.TestCase):

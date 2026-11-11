@@ -107,6 +107,26 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
     return done
 
 
+def caption_txt_path(report: ParsedReport, image: ReportImage,
+                     captions_dir: str | Path | None = None) -> Path:
+    """图片描述 txt 的路径：captions_dir 为空时与原报告同目录。"""
+    target_dir = Path(captions_dir) if captions_dir else Path(report.source_path).parent
+    return target_dir / image.txt_name(report)
+
+
+def load_caption_txt(report: ParsedReport, image: ReportImage,
+                     captions_dir: str | Path | None = None) -> str | None:
+    """读取图片已有的描述 txt（pic-e 模式）。
+
+    文件不存在或内容为空白时返回 None，由调用方决定是否交给 vllm 识别。
+    """
+    txt_path = caption_txt_path(report, image, captions_dir)
+    if not txt_path.is_file():
+        return None
+    text = txt_path.read_text(encoding="utf-8-sig").strip()
+    return text or None
+
+
 def save_caption_txt(report: ParsedReport, image: ReportImage,
                      captions_dir: str | Path | None = None) -> Path | None:
     """把单张图片的描述另存为 '课程名称-专业班级-学号-姓名-Pn.txt'。
@@ -115,9 +135,8 @@ def save_caption_txt(report: ParsedReport, image: ReportImage,
     """
     if not image.caption:
         return None
-    target_dir = Path(captions_dir) if captions_dir else Path(report.source_path).parent
-    target_dir.mkdir(parents=True, exist_ok=True)
-    txt_path = target_dir / f"{report.base_name}-P{image.index}.txt"
+    txt_path = caption_txt_path(report, image, captions_dir)
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
     txt_path.write_text(image.caption, encoding="utf-8")
     return txt_path
 

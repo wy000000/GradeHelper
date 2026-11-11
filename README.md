@@ -52,14 +52,14 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 - 评分项修改：各评分项可让前端AI agent根据课程需要辅助修改。新增的code评分项，可以让前端AI agent添加；新增的LLM评分项，系统会自适应，无需改代码。
 
 ## 常用参数
-
+因调试原因，默认值可能不准，请用参数指定。
 | 参数 | 说明 |
 | --- | --- |
 | `--template XLSX` | 评分模板，**必填** |
 | `--reports DIR` | 报告目录，默认当前工作目录 |
 | `--output XLSX` | 结果文件路径；缺省时按规则生成在模板同目录 |
 | `--tagDep NAME` | 系部专业标识，用于结果与日志文件名（默认 `系部专业`） |
-| `--stage STAGE` | `doc` / `pic` / `sen` / `full`（默认）；出错后可用 `--stage` 单独续跑某一步 |
+| `--stage STAGE` | `doc` / `pic` / `pic-e` / `sen` / `full` / `full-e`（默认）；出错后可用 `--stage` 单独续跑某一步 |
 | `--incremental true\|false` | 增量模式，只处理未完成部分；**必须显式给出值**，默认 `false` |
 | `--files NAME...` | 只处理指定报告（文件主名或完整名，逗号/空格分隔） |
 | `--skip-images N` | 跳过每份报告前 N 张图片（默认 2，如封面、评分表），各阶段需传相同值 |
@@ -71,14 +71,16 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 
 ## 阶段与模式
 
-程序可分为三个阶段，以及 `full`：
+程序可分为三个阶段，以及 `full` / `full-e`：
 
 | 阶段 | 简单说明 |
 | --- | --- |
 | `doc` | 解析报告文档（docx/doc/pdf），Code 评分项程序化打分 |
 | `pic` | 识别报告中的图片，把图片描述写回文档 |
+| `pic-e` | 先查找图片对应的描述 txt：有就直接写回文档，没有才调用 vllm 识别 |
 | `sen` | 用大模型对 LLM 评分项逐项评估，写入结果表 |
-| `full` | 默认：依次执行 doc → pic → sen，一条命令跑完全部 |
+| `full` | 依次执行 doc → pic → sen，一条命令跑完全部 |
+| `full-e` | 默认：依次执行 doc → pic-e → sen（图片阶段优先复用已有描述 txt） |
 
 程序包含四种运行模式（由 `--files` 与 `--incremental` 组合决定）：
 
@@ -94,6 +96,12 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 - **初次运行**：全部增量或全部全量，建议全部增量。
 - **有学生补交作业**：全部增量、指定增量或指定全量，建议全部增量。
 - **有学生修改作业**：指定全量。
+- **改动code规则**：doc全量。
+- **改动图片识别规则**：pic全量。
+- **改动LLM规则**：sen全量。
+- **stage-e**：谨慎使用，能节省图片二次识别时间，但误用会导致修改的作业不能正确更新图片描述。
+
+
 
 ## 运行结果
 
@@ -107,6 +115,7 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 - 运行前请**关闭 Excel 中打开的结果文件**，否则程序会提示“结果文件无法写入”并以退出码 1 结束。
 - 报告文件名不符合格式会被静默忽略——跑完发现没处理时先检查命名。
 - 某一步失败后 `full` 会停止执行后续步骤；修复问题后可用 `--stage` 单独续跑。
+- `pic-e` 与 `pic` 使用相同的产物：优先复用已有的 `...-Pn.txt` 描述（`paths.captions_dir` 为空时与 md 同目录），只把缺失描述的图片交给 vllm；适合已有识图结果、只想重新写入 md 或补齐少量图片的场景。
 
 ## 更多文档
 

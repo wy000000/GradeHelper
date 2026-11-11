@@ -309,7 +309,8 @@ class DocStageMixin:
             if failed_documents:
                 extra["失败文档"] = "、".join(failed_documents)
             extra["并发"] = f"{parse_workers} 线程"
-            extra["图片"] = f"解析 {image_total} 张 / 保留 {image_kept} 张"
+            extra["图片"] = (f"解析 {image_total} 张 / 跳过前 {skip_images} 张 / "
+                             f"保留 {image_kept} 张")
             extra["跳过图片"] = f"前 {skip_images} 张"
             if self.incremental:
                 extra["增量跳过"] = f"{skipped_existing_records} 个结果文件中已有记录的文档"

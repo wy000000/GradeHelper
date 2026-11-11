@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def _quiet_mineru_logs() -> Iterator[None]:
-    """解析期间抑制 MinerU 的 loguru INFO/DEBUG 日志，避免刷屏。
+    """解析期间抑制 MinerU 的 loguru INFO/DEBUG/WARNING 日志，避免刷屏。
 
-    MinerU 每页输出一条 infer 完成信息，而解析进度已由 run_file_batch 的进度条显示。
-    临时将 loguru 级别提高到 WARNING，解析完成后恢复默认配置。
+    MinerU 每页输出一条 infer 完成信息，docvortex 等原生解析器还会输出大量
+    非致命 WARNING（如 DOCX 图片 CRC 校验失败），而解析进度与失败原因已由
+    run_file_batch 的进度条和阶段日志记录。临时将 loguru 级别提高到 ERROR，
+    只保留真正的错误，解析完成后恢复默认配置。
     """
     try:
         from loguru import logger as loguru_logger
@@ -40,7 +42,7 @@ def _quiet_mineru_logs() -> Iterator[None]:
         yield
         return
     loguru_logger.remove()
-    loguru_logger.add(sys.stderr, level="WARNING")
+    loguru_logger.add(sys.stderr, level="ERROR")
     try:
         yield
     finally:

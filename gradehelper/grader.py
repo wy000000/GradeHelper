@@ -1,7 +1,7 @@
-"""总编排：doc(解析+程序规则) → pic(vllm识图) → sen(llm语义评分)，可独立执行。
+"""总编排：doc(解析+程序规则) → pic/pic-e(图片描述回写) → sen(llm语义评分)，可独立执行。
 
 阶段内：单文件出错只记录并继续完成本阶段（由 batch 与各阶段自行容错）；
-阶段间（full 模式）：当前阶段结束后若仍有错误，不再执行下一阶段。
+阶段间（full / full-e 模式）：当前阶段结束后若仍有错误，不再执行下一阶段。
 
 三个阶段的具体实现位于 ``gradehelper.stages``，以 mixin 形式组合进 :class:`Grader`。
 """
@@ -139,7 +139,7 @@ class Grader(DocStageMixin, PicStageMixin, SenStageMixin, RunLogMixin):
         raise RuntimeError(message)
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
-            output: str | None = None, stage: str = "full",
+            output: str | None = None, stage: str = "full-e",
             skip_images: int = 2, tag_dep: str = "系部专业",
             incremental: bool = False,
             files: list[str] | str | None = None) -> Path | None:
@@ -169,15 +169,21 @@ class Grader(DocStageMixin, PicStageMixin, SenStageMixin, RunLogMixin):
                                 template=template, output=output)
 
         try:
-            if stage == "full":
+            if stage in ("full", "full-e"):
                 # 阶段内出错继续完成本阶段（各阶段自行容错）；
                 # 阶段之间：当前阶段结束后仍有错误时不再执行下一阶段
+                # full-e 与 full 的唯一区别：图片阶段使用 pic-e（优先复用描述 txt）
+                use_pic_e = stage == "full-e"
+                pic_stage = "pic-e" if use_pic_e else "pic"
                 self.stage_doc(reports_dir, template, skip_images, tag_dep=tag_dep, output=output)
                 if self._last_stage_has_errors():
-                    self._abort_followup_stages("doc", ("pic", "sen"))
-                self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
+                    self._abort_followup_stages("doc", (pic_stage, "sen"))
+                if use_pic_e:
+                    self.stage_pic_e(reports_dir, template, skip_images, tag_dep=tag_dep)
+                else:
+                    self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
                 if self._last_stage_has_errors():
-                    self._abort_followup_stages("pic", ("sen",))
+                    self._abort_followup_stages(pic_stage, ("sen",))
                 return self.stage_sen(reports_dir, template, output, skip_images, tag_dep=tag_dep)
 
             if stage == "doc":
@@ -186,6 +192,10 @@ class Grader(DocStageMixin, PicStageMixin, SenStageMixin, RunLogMixin):
 
             if stage == "pic":
                 self.stage_pic(reports_dir, template, skip_images, tag_dep=tag_dep)
+                return None
+
+            if stage == "pic-e":
+                self.stage_pic_e(reports_dir, template, skip_images, tag_dep=tag_dep)
                 return None
 
             if stage == "sen":

@@ -43,20 +43,22 @@ def build_parser() -> argparse.ArgumentParser:
     gradeTemplate_dir = None
 
     reports_dir = "D:\AI\Reports"
-    # reports_dir = "D:\AI\Reports\课程报告"
-    gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
-    # reports_dir = "D:\AI\Reports"
-    # reports_dir = "D:\AI\Reports\实验报告"
-    # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+    # reports_dir = "D:\AI\Reports\课程报告"
+    # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
+
+    reports_dir = "D:\AI\Reports\实验报告"
+    gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
 
     skip_images = 2
     stage = "doc"
-    stage = "pic"
+    # stage = "pic"
+    stage = "pic-e"
     stage = "sen"
-    # stage = "full"    
+    # stage = "full" 
+    # stage = "full-e"
     incremental = False
-    incremental = True
+    # incremental = True
 
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；
@@ -78,8 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tagDep", default="系部专业",
                         help="系部专业标识，用于结果文件命名（默认：系部专业）")
     parser.add_argument("--skip-images", type=int, default=skip_images, help="解析时跳过前面 N 张图片（默认 2）")
-    parser.add_argument("--stage", choices=["doc", "pic", "sen", "full"], default=stage,
-                        help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，sen=llm语义评分，full=全部（默认）")
+    parser.add_argument("--stage",
+                        choices=["doc", "pic", "pic-e", "sen", "full", "full-e"],
+                        default=stage,
+                        help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，"
+                             "pic-e=优先复用图片描述 txt（缺失的再交给 vllm），"
+                             "sen=llm语义评分，full=全部，"
+                             "full-e=全部（图片阶段使用 pic-e，默认）")
     parser.add_argument("--incremental", type=_parse_bool, default=incremental,
                         metavar="true|false",
                         help="增量模式：true=开启，false=关闭（默认 false）。"
@@ -87,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "sen 只评分 LLM 项未评分的报告")
     parser.add_argument("--files", nargs="+", default=files, metavar="NAME",
                         help="只更新指定的报告文件（主名或完整文件名，逗号/空格分隔，"
-                             "对 doc/pic/sen 三个阶段均有效）；省略=处理全部（默认）")
+                             "对 doc/pic/pic-e/sen 三个阶段均有效）；省略=处理全部（默认）")
     return parser
 
 def main(argv: list[str] | None = None) -> int:

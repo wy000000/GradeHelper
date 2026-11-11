@@ -1,0 +1,12 @@
+当出错时，“【阶段 sen】云安全-信息安全2301-3220802028-胡崎-实验报告：docker的安装配置与操作.md: 第 1 次评分失败: LLM 返回的 JSON 不完整（可能被截断），缺少评分项: 1Install、2Pull、3Run、4ListC、5StopC、6RemoveC、7ListCa、8RemoveI、9ListI”，保存全部信息的附属log没有记录，附log应该存于主log所在路径的子文件夹.\log中，请修改。
+
+stage默认full
+
+2026-11-12 01:13:10,693 INFO gradehelper.grader: 【阶段 sen】实时回写 2/66 份评分 → 云安全-系部专业-实验报告：docker的安装配置与操作-评分结果.xlsx
+2026-11-12 01:16:46,245 INFO gradehelper.excel_io: 评分结果已写入 云安全-系部专业-实验报告：docker的安装配置与操作-评分结果.xlsx（4 行，模式=strict）
+2026-11-12 01:16:46,245 INFO gradehelper.grader: 【阶段 sen】实时回写 4/66 份评分 → 云安全-系部专业-实验报告：docker的安装配置与操作-评分结果.xlsx
+2026-11-12 01:20:21,193 INFO gradehelper.excel_io: 评分结果已写入 云安全-系部专业-实验报告：docker的安装配置与操作-评分结果.xlsx（6 行，模式=strict）
+
+不重复
+
+有结果就回写，不分批回写。pic同样。doc如果复用了相同的流程，也可以改。
