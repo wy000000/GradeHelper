@@ -27,7 +27,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
     image_prompt 会原样作为文本消息提交给 /chat/completions API。
     cancel 用于中断：置位后关闭在飞连接，让服务端停止生成。
     on_error 在单张图片识别失败时调用，便于记录到具体文档的运行日志。
-    on_batch 每完成 cfg.batch_size 张图片（以及全部结束时）回调一次，参数为本批
+    on_batch 每完成 cfg.vllm_workers 张图片（以及全部结束时）回调一次，参数为本批
     已完成识别的 (报告, 图片) 列表，用于实时回写描述；回调异常不影响识图。
     """
     client = LLMClient(cfg, cancel=cancel)
@@ -38,9 +38,9 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
         return 0
 
     logger.info("开始 vllm 图片识别：%d 张，端点 %s，模型 %s，并发 %d",
-                len(tasks), cfg.base_url, cfg.get_model(), cfg.batch_size)
+                len(tasks), cfg.base_url, cfg.get_model(), cfg.vllm_workers)
     done = 0
-    flush_every = max(1, cfg.batch_size)
+    flush_every = max(1, cfg.vllm_workers)
     pending: list[tuple[ParsedReport, ReportImage]] = []
 
     def _flush_batch() -> None:
@@ -57,7 +57,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
             logger.error("图片描述实时回写失败", exc_info=True)
 
     progress = ParallelProgress("pic", len(tasks), unit="张",
-                                workers=max(1, cfg.batch_size))
+                                workers=max(1, cfg.vllm_workers))
 
     def _describe(report: ParsedReport, image: ReportImage) -> tuple[str, int, str]:
         label = f"{report.student_id}-P{image.index}"
@@ -66,7 +66,7 @@ def caption_images(reports: list[ParsedReport], cfg: EndpointConfig, image_promp
                     client.describe_image(image.data, image.ext, image_prompt))
 
     with progress:
-        pool = ThreadPoolExecutor(max_workers=max(1, cfg.batch_size))
+        pool = ThreadPoolExecutor(max_workers=max(1, cfg.vllm_workers))
         try:
             futures = {pool.submit(_describe, r, i): (r, i) for r, i in tasks}
             remaining = dict(futures)

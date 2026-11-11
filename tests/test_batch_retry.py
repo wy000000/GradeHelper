@@ -242,7 +242,7 @@ class TestSenRetry(unittest.TestCase):
 
     def _grader(self, retry_rounds: int = 1, batch: int = 2) -> Grader:
         grader = Grader(AppConfig(
-            llm=EndpointConfig(batch_size=batch),
+            llm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
             paths=PathsConfig(
                 report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
                 report_name_separator="-",
@@ -434,12 +434,12 @@ class TestSenRetry(unittest.TestCase):
         # 首轮用配置值 4；两次重试轮都用减半值 2（不逐轮再减为 1）
         self.assertEqual(pools, [4, 2, 2])
         # 配置本身不被就地修改
-        self.assertEqual(grader.config.llm.batch_size, 4)
+        self.assertEqual(grader.config.llm.llm_workers, 4)
         self.assertEqual(calls["2021002"], 3)
 
 
 class TestPicRetryHalvesBatch(unittest.TestCase):
-    """pic 进入 retry_rounds 后 vllm batch_size 按配置值减半（不逐轮递归减半）。"""
+    """pic 进入 retry_rounds 后 vllm vllm_workers 按配置值减半（不逐轮递归减半）。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -473,7 +473,7 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
 
     def _grader(self, batch: int, retry_rounds: int) -> Grader:
         return Grader(AppConfig(
-            vllm=EndpointConfig(batch_size=batch),
+            vllm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
             paths=PathsConfig(
                 report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
                 report_name_separator="-",
@@ -483,14 +483,14 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
             prompts=PromptsConfig(image_context="[图片描述 P{n}: {caption}]"),
         ))
 
-    def test_retry_uses_halved_batch_size_not_recursive(self):
+    def test_retry_uses_halved_vllm_workers_not_recursive(self):
         """首轮用配置值；进入重试后减半一次，后续重试轮沿用同一值。"""
         report = self._report()
         seen: list[int] = []
 
         def fake_caption_images(_reports, cfg, _prompt, *, cancel=None,
                                 on_error=None, on_batch=None):
-            seen.append(cfg.batch_size)
+            seen.append(cfg.vllm_workers)
             if len(seen) <= 2:  # 首轮与第 1 次重试都失败，触发下一轮重试
                 if on_error is not None:
                     on_error(_reports[0], _reports[0].images[0],
@@ -513,7 +513,7 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
         # 首轮 4；两次重试轮都用 2（按配置值只减半一次，不逐轮再减为 1）
         self.assertEqual(seen, [4, 2, 2])
         # 配置本身不被就地修改
-        self.assertEqual(grader.config.vllm.batch_size, 4)
+        self.assertEqual(grader.config.vllm.vllm_workers, 4)
 
 
 if __name__ == "__main__":

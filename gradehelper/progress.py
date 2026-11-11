@@ -10,7 +10,7 @@
 用法::
 
     with ParallelProgress("sen", len(reports), unit="份",
-                          workers=cfg.llm.batch_size) as progress:
+                          workers=cfg.llm.llm_workers) as progress:
         with ThreadPoolExecutor(max_workers=...) as pool:
             futures = [pool.submit(work, report) for report in reports]
             for future in as_completed(futures):

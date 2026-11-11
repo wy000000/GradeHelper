@@ -595,7 +595,7 @@ class Grader(RunLogMixin):
                 saved_md_keys.add(key)
 
         def _on_caption_batch(items: list[tuple[ParsedReport, ReportImage]]) -> None:
-            """按 batch_size 实时回写：图片描述 txt + 涉及的 md，无需等整阶段结束。"""
+            """按 vllm_workers 实时回写：图片描述 txt + 涉及的 md，无需等整阶段结束。"""
             touched: dict[str, ParsedReport] = {}
             for report, image in items:
                 _save_caption(report, image)
@@ -641,7 +641,7 @@ class Grader(RunLogMixin):
                     "评分模板": str(template),
                     "base_url": cfg.vllm.base_url or "（未配置）",
                     "model": str(cfg.vllm.get_model() or "（未配置）"),
-                    "并发": f"{max(1, cfg.vllm.batch_size)} 线程",
+                    "并发": f"{max(1, cfg.vllm.vllm_workers)} 线程",
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
@@ -705,7 +705,7 @@ class Grader(RunLogMixin):
                                 if self.incremental else "没有需要识别的图片")
                 else:
                     logger.info("【阶段 pic】vllm 批量识别图片（每 %d 张实时回写）",
-                                max(1, cfg.vllm.batch_size))
+                                max(1, cfg.vllm.vllm_workers))
                     try:
                         caption_images(
                             reports, cfg.vllm, cfg.prompts.image_prompt,
@@ -723,10 +723,10 @@ class Grader(RunLogMixin):
                     _clear_resolved_caption_errors(reports)
 
                     # 整批完成后重试异常队列（只重试失败的 md 文件）。
-                    # 进入重试轮：vllm 并发（batch_size）按配置值减半——只减一次，
+                    # 进入重试轮：vllm 并发（vllm_workers）按配置值减半——只减一次，
                     # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
                     retry_vllm = replace(cfg.vllm,
-                                         batch_size=max(1, cfg.vllm.batch_size // 2))
+                                         vllm_workers=max(1, cfg.vllm.vllm_workers // 2))
                     for retry in range(1, max_attempts):
                         pending_keys = _pending_keys()
                         pending_reports = [report_by_key[key] for key in pending_keys
@@ -737,7 +737,7 @@ class Grader(RunLogMixin):
                             "【阶段 pic】第 %d/%d 轮重试 %d 个异常文件"
                             "（并发降为 %d，缺失图片重新识别后覆盖保存）",
                             retry + 1, max_attempts, len(pending_reports),
-                            retry_vllm.batch_size)
+                            retry_vllm.vllm_workers)
                         # 只把仍缺描述的图片交给 vllm，已成功的图片不重复识别
                         missing_reports = [
                             replace(report,
@@ -834,7 +834,7 @@ class Grader(RunLogMixin):
             }
             extra["base_url"] = cfg.vllm.base_url or "（未配置）"
             extra["model"] = str(cfg.vllm.get_model() or "（未配置）")
-            extra["并发"] = f"{max(1, cfg.vllm.batch_size)} 线程"
+            extra["并发"] = f"{max(1, cfg.vllm.vllm_workers)} 线程"
             if caption_enabled:
                 img_failed = len(caption_errors) + len(txt_errors)
                 img_success = max(0, caption_done - len(txt_errors))
@@ -930,8 +930,8 @@ class Grader(RunLogMixin):
         claim: ResultFileClaim | None = None
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
-        # 每完成 batch_size 份报告就把已完成评分回写结果文件（中断也不丢已完成部分）
-        checkpoint_every = max(1, cfg.llm.batch_size)
+        # 每完成 llm_workers 份报告就把已完成评分回写结果文件（中断也不丢已完成部分）
+        checkpoint_every = max(1, cfg.llm.llm_workers)
         # 实时回写失败后的“冷却”位置：再多完成一批才重试，避免每批都卡在重试上
         checkpoint_retry_at = 0
         checkpoint_failures = 0
@@ -1054,7 +1054,7 @@ class Grader(RunLogMixin):
                     "结果文件": str(hint) if hint else "",
                     "base_url": cfg.llm.base_url or "（未配置）",
                     "model": str(cfg.llm.get_model() or "（未配置）"),
-                    "并发": f"{max(1, cfg.llm.batch_size)} 线程",
+                    "并发": f"{max(1, cfg.llm.llm_workers)} 线程",
                     "解析并发": f"{parse_workers} 线程",
                     "重试轮数": f"{max(0, int(cfg.paths.retry_rounds))} 轮",
                     "跳过图片": f"前 {skip_images} 张",
@@ -1183,7 +1183,7 @@ class Grader(RunLogMixin):
                         return result_path
 
                 logger.info("【阶段 sen】LLM 评分项批量评估（每份报告一次提交 %d 项），并发 %d",
-                            len(llm_rules), max(1, cfg.llm.batch_size))
+                            len(llm_rules), max(1, cfg.llm.llm_workers))
                 client = LLMClient(cfg.llm, cancel=self.cancel_token)
 
                 def _on_graded(result: tuple[ParsedReport, dict[str, ItemScore]]) -> None:
@@ -1218,10 +1218,10 @@ class Grader(RunLogMixin):
                     stage="sen",
                     items=reports,
                     worker=lambda report: _grade_one(report, client, llm_rules),
-                    workers=max(1, cfg.llm.batch_size),
-                    # 进入重试轮：llm 并发（batch_size）按配置值减半——只减一次，
+                    workers=max(1, cfg.llm.llm_workers),
+                    # 进入重试轮：llm 并发（llm_workers）按配置值减半——只减一次，
                     # 后续重试轮沿用同一值，不逐轮递归减半（下限 1 线程）
-                    retry_workers=max(1, cfg.llm.batch_size // 2),
+                    retry_workers=max(1, cfg.llm.llm_workers // 2),
                     path_of=lambda report: Path(report.source_path),
                     label_of=_doc_name,
                     unit="份",
@@ -1291,7 +1291,7 @@ class Grader(RunLogMixin):
                 "LLM 评分项": f"{llm_rule_count} 项",
                 "base_url": cfg.llm.base_url or "（未配置）",
                 "model": str(cfg.llm.get_model() or "（未配置）"),
-                "并发": f"{max(1, cfg.llm.batch_size)} 线程",
+                "并发": f"{max(1, cfg.llm.llm_workers)} 线程",
             }
             if sen_pending:
                 extra["未完成"] = f"{sen_pending} 份"

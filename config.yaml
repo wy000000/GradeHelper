@@ -27,7 +27,7 @@ endpoints:
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # LLM 端点的失败重试次数配置。
-      batch_size: 4        # sen 阶段并发提交的报告数（进入 retry_rounds 重试轮后减半，最小 1）
+      llm_workers: 2       # sen 阶段 LLM 评分并发线程数（进入 retry_rounds 重试轮后减半，最小 1）
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
@@ -60,7 +60,7 @@ endpoints:
       connect_timeout: 10  # TCP/TLS 连接超时（秒）
       read_timeout: 300    # 流式读取：两个数据块之间的最大静默时间（秒）
       max_retries: 1       # VLLM 端点的失败重试次数配置。
-      batch_size: 4        # 并发识别图片数（进入 retry_rounds 重试轮后减半，最小 1）
+      vllm_workers: 2      # pic 阶段图片识别并发线程数（进入 retry_rounds 重试轮后减半，最小 1）
     api:                   # 发送给 /chat/completions 的参数；新增任意键都会自动透传
       temperature: 0.0     # 贪心解码
       top_p: 1.0           # 关闭
@@ -121,7 +121,8 @@ prompts:
     评分项列表（格式：评分项编号；分数范围；评分标准）：
     {items_section}
 
-    输出要求： 只输出一个 JSON 对象，不要输出任何其他内容，key 为评分项编号，value 为：
+    输出要求： 只输出一个 JSON 对象，不要输出任何其他内容，不要在 JSON 对象前后添加任何说明、前缀、后缀或花括号。
+    key 为评分项编号，value 为：
       {"score": <0-100整数>, "confidence": <0~1的数字>, "comment": "<评语>"}
 
     报告内容（Markdown，其中图片位置已嵌入由多模态模型生成的图片描述）：

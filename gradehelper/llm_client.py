@@ -482,7 +482,16 @@ class LLMClient:
 
 
 def parse_json_object(text: str) -> dict:
-    """从 LLM 输出中提取第一个 JSON 对象。"""
+    """从 LLM 输出中提取第一个可解析的 JSON 对象。
+
+    LLM 可能在 JSON 前后夹带说明文字，且说明文字里也可能出现 ``{``。
+    因此不能只取第一个 ``{``：若第一个 ``{`` 开始的子串有匹配的闭合
+    ``}`` 但本身无法解析，会继续尝试后续的 ``{``。
+
+    不过，若第一个 ``{`` 对应的对象本身就找不到闭合 ``}``
+    （``_find_json_end`` 返回 -1），说明最外层对象已被截断，直接报错，
+    不再回退到内部子对象，避免把截断的 JSON 误当成成功。
+    """
     text = text.strip()
     # 去掉 ```json ... ``` 包裹
     if text.startswith("```"):
@@ -490,41 +499,54 @@ def parse_json_object(text: str) -> dict:
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
 
-    # 修复 LLM 常见的尾随逗号：{"a": 1,} -> {"a": 1}
-    repaired = re.sub(r",\s*([}\]])", r"\1", text)
-    if repaired != text:
-        try:
-            return json.loads(repaired)
-        except json.JSONDecodeError:
-            pass
+    # 先尝试整个文本（适用于纯 JSON 输出）
+    result = _try_parse_one(text)
+    if result is not None:
+        return result
 
-    # 花括号匹配回退：必须跳过字符串内部的 { }，否则 comment 里出现花括号会
-    # 导致深度计数错误，截出错误的子串或永远找不到闭合位置。
     start = text.find("{")
     if start >= 0:
         end = _find_json_end(text, start)
-        if end > start:
-            candidate = text[start:end]
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
-                if repaired != candidate:
-                    try:
-                        return json.loads(repaired)
-                    except json.JSONDecodeError:
-                        pass
+        if end < 0:
+            # 最外层对象未闭合，JSON 被截断，不再尝试内部子对象
+            pass
+        else:
+            # 依次尝试从每个 '{' 开始的子串，第一个可解析的即返回
+            pos = start
+            while True:
+                end = _find_json_end(text, pos)
+                if end > pos:
+                    candidate = text[pos:end]
+                    result = _try_parse_one(candidate)
+                    if result is not None:
+                        return result
+                nxt = text.find("{", pos + 1)
+                if nxt < 0:
+                    break
+                pos = nxt
+
     raise ValueError(
         f"无法从 LLM 输出中解析 JSON（长度={len(text)}）：\n"
         f"  前 200 字符: {text[:200]!r}\n"
         f"  后 200 字符: {text[-200:]!r}\n"
         "提示：若末尾明显被截断，请检查 finish_reason / max_tokens（思考模式可能耗尽生成预算）"
     )
+
+
+def _try_parse_one(text: str) -> dict | None:
+    """尝试直接解析文本及其尾随逗号修复版，成功则返回 dict，否则返回 None。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
+    if repaired != text:
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _find_json_end(text: str, start: int) -> int:

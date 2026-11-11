@@ -28,8 +28,8 @@ IMAGE_CONTEXT = "[图片描述 P{n}: {caption}]"
 
 def _config(batch: int = 2) -> AppConfig:
     return AppConfig(
-        llm=EndpointConfig(batch_size=batch),
-        vllm=EndpointConfig(batch_size=batch),
+        llm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
+        vllm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
         paths=PathsConfig(
             report_name_format=NAME_FORMAT,
             report_name_separator="-",

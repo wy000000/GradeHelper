@@ -131,7 +131,7 @@ def run_file_batch(
     - ``progress_stage``：进度条显示的阶段名；默认与 ``stage`` 相同。
       加载 md、LLM 评分等同一阶段内的多个批处理可借此区分，避免进度提示混淆。
     - ``retry_workers``：重试轮（第 2 次及以后尝试）的并发线程数；``None`` 表示
-      与首轮相同。``pic`` / ``sen`` 进入 ``retry_rounds`` 时传入 ``batch_size``
+      与首轮相同。``pic`` / ``sen`` 进入 ``retry_rounds`` 时传入 ``workers``
       减半后的值：配置值只减半一次，后续重试轮沿用同一值，不再递归减半（下限 1）。
 
     返回成功结果（保持输入顺序）与最终异常队列。
@@ -156,7 +156,7 @@ def run_file_batch(
         # 重试轮中 pending 全是上一轮失败的文档：失败数先按 pending 计入，
         # 同一文档再次失败不重复累计，重试成功后失败数减一。
         # 首轮用 workers；重试轮可用更小的 retry_workers（pic/sen 进入
-        # retry_rounds 时传入 batch_size 减半后的值，只减一次、不逐轮再减）
+        # retry_rounds 时传入 workers 减半后的值，只减一次、不逐轮再减）
         round_workers = (max(1, int(workers))
                          if attempt == 1 or retry_workers is None
                          else max(1, int(retry_workers)))

@@ -53,7 +53,8 @@ class EndpointConfig:
     connect_timeout: int = 0      # TCP/TLS 连接超时（秒）
     read_timeout: int = 0         # 等待响应数据的超时（秒）
     max_retries: int = 0
-    batch_size: int = 0   # 并发数；pic/sen 进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）
+    llm_workers: int = 0   # sen 阶段 LLM 评分并发线程数；进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）
+    vllm_workers: int = 0  # pic 阶段图片识别并发线程数；进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）
 
     # ---- API 参数（来自 YAML 的 api 子区域，全部透传给 /chat/completions）----
     # api 子区域中出现的所有键值对原样存入此字典；新增任意键自动生效，无需改代码

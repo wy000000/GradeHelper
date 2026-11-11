@@ -1,4 +1,4 @@
-"""实时回写测试：pic 按 batch_size 回写图片描述与 md，sen 按 batch_size 回写结果表。"""
+"""实时回写测试：pic 按 vllm_workers 回写图片描述与 md，sen 按 llm_workers 回写结果表。"""
 
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ BASE = "云安全-安全2401-{sid}-张三-课程报告"
 
 def _config(batch: int = 2) -> AppConfig:
     return AppConfig(
-        llm=EndpointConfig(batch_size=batch),
-        vllm=EndpointConfig(batch_size=batch),
+        llm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
+        vllm=EndpointConfig(llm_workers=batch, vllm_workers=batch),
         paths=PathsConfig(
             report_name_format="{course}-{klass}-{student_id}-{stdName}-{reportName}",
             report_name_separator="-",
@@ -83,11 +83,11 @@ class TestCaptionBatchCallback(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_on_batch_called_every_batch_size_and_at_end(self):
+    def test_on_batch_called_every_vllm_workers_and_at_end(self):
         reports = [_pic_report(self.tmp, sid) for sid in ("2021001", "2021002", "2021003")]
         batches: list[int] = []
         with patch("gradehelper.image_caption.LLMClient", _FakeClient):
-            done = caption_images(reports, EndpointConfig(batch_size=2), "prompt",
+            done = caption_images(reports, EndpointConfig(vllm_workers=2), "prompt",
                                   on_batch=lambda items: batches.append(len(items)))
         self.assertEqual(done, 3)
         self.assertEqual(batches, [2, 1])  # 每 2 张一批 + 收尾不足一批
@@ -96,7 +96,7 @@ class TestCaptionBatchCallback(unittest.TestCase):
     def test_without_callback_still_captions(self):
         reports = [_pic_report(self.tmp)]
         with patch("gradehelper.image_caption.LLMClient", _FakeClient):
-            self.assertEqual(caption_images(reports, EndpointConfig(batch_size=1), "prompt"), 1)
+            self.assertEqual(caption_images(reports, EndpointConfig(vllm_workers=1), "prompt"), 1)
         self.assertEqual(reports[0].images[0].caption, "自动描述")
 
 
@@ -280,7 +280,7 @@ class TestSenCheckpointWriteback(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_sen_writes_back_every_batch_size(self):
+    def test_sen_writes_back_every_llm_workers(self):
         grader = Grader(_config(batch=2))
         grader.config.llm.base_url = "http://llm.test"
         grader.config.llm.model = "llm-test"
