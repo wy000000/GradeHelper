@@ -129,7 +129,7 @@ class TestStagesAbortWhenResultLocked(unittest.TestCase):
 
     def test_doc_stage_aborts_before_parse(self):
         with _locked_open(self.result_path), \
-                patch("gradehelper.grader.parse_all") as parse_all:
+                patch("gradehelper.stages.doc.parse_all") as parse_all:
             with self.assertRaises(RuntimeError) as ctx:
                 _grader().stage_doc(self.tmp, self.template)
         self.assertIn("结果文件无法写入", str(ctx.exception))
@@ -139,7 +139,7 @@ class TestStagesAbortWhenResultLocked(unittest.TestCase):
 
     def test_sen_stage_aborts_before_read_rules(self):
         with _locked_open(self.result_path), \
-                patch("gradehelper.grader.read_rules") as read_rules:
+                patch("gradehelper.stages.sen.read_rules") as read_rules:
             with self.assertRaises(RuntimeError) as ctx:
                 _grader().stage_sen(self.tmp, self.template)
         self.assertIn("结果文件无法写入", str(ctx.exception))
@@ -147,7 +147,7 @@ class TestStagesAbortWhenResultLocked(unittest.TestCase):
 
     def test_doc_stage_runs_when_result_not_locked(self):
         # 结果文件存在但未被占用时，检查通过，继续正常流程
-        with patch("gradehelper.grader.parse_all", return_value=[]):
+        with patch("gradehelper.stages.doc.parse_all", return_value=[]):
             with self.assertRaises(RuntimeError) as ctx:
                 _grader().stage_doc(self.tmp, self.template)
         # 走到“目录中没有符合命名格式的报告”说明未在检查处退出

@@ -123,12 +123,12 @@ class TestDocIncremental(unittest.TestCase):
     def _run_doc(self, grader: Grader, parsed: list[ParsedReport]):
         grader._log_path = self.tmp / "run.log"
         grader._save_parsed_batch = lambda reports, **kwargs: list(reports)
-        with patch("gradehelper.grader.parse_all", return_value=parsed) as parse_mock, \
-                patch("gradehelper.grader.read_rules",
+        with patch("gradehelper.stages.doc.parse_all", return_value=parsed) as parse_mock, \
+                patch("gradehelper.stages.doc.read_rules",
                       return_value=self.rules) as rules_mock, \
-                patch("gradehelper.grader.run_program_rules",
+                patch("gradehelper.stages.doc.run_program_rules",
                       return_value=({}, [])), \
-                patch("gradehelper.grader.write_results_atomic") as write_mock:
+                patch("gradehelper.stages.doc.write_results_atomic") as write_mock:
             out = grader.stage_doc(self.tmp, self.template, output=self.result_path)
         return out, parse_mock, rules_mock, write_mock
 
@@ -212,9 +212,9 @@ class TestDocIncremental(unittest.TestCase):
         grader = Grader(_config())
         grader.incremental = True
 
-        with patch("gradehelper.grader.parse_all", return_value=[]), \
-                patch("gradehelper.grader.read_rules"), \
-                patch("gradehelper.grader.write_results_atomic"):
+        with patch("gradehelper.stages.doc.parse_all", return_value=[]), \
+                patch("gradehelper.stages.doc.read_rules"), \
+                patch("gradehelper.stages.doc.write_results_atomic"):
             with self.assertRaises(RuntimeError):
                 grader.stage_doc(self.tmp, self.template, output=self.result_path)
 
@@ -260,9 +260,9 @@ class TestPicIncremental(unittest.TestCase):
         grader.incremental = True
         grader._log_path = self.tmp / "run.log"
 
-        with patch("gradehelper.grader.caption_images",
+        with patch("gradehelper.stages.pic.caption_images",
                    self._fake_caption_images(received)), \
-                patch("gradehelper.grader.read_rules", return_value=self.rules):
+                patch("gradehelper.stages.pic.read_rules", return_value=self.rules):
             grader.stage_pic(self.tmp, self.template)
 
         self.assertEqual(received, [("2021002", 3)])
@@ -283,9 +283,9 @@ class TestPicIncremental(unittest.TestCase):
         grader = Grader(_config())
         grader.incremental = False
 
-        with patch("gradehelper.grader.caption_images",
+        with patch("gradehelper.stages.pic.caption_images",
                    self._fake_caption_images(received)), \
-                patch("gradehelper.grader.read_rules", return_value=self.rules):
+                patch("gradehelper.stages.pic.read_rules", return_value=self.rules):
             grader.stage_pic(self.tmp, self.template)
 
         self.assertEqual(received, [("2021001", 3), ("2021002", 3)])
@@ -344,7 +344,7 @@ class TestSenIncremental(unittest.TestCase):
         grader._load_reports_for_pic = lambda *args, **kwargs: list(self.reports)
         grader._grade_with_llm_batch = fake_grade
 
-        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
@@ -378,8 +378,8 @@ class TestSenIncremental(unittest.TestCase):
         grader.incremental = True
         grader._load_reports_for_pic = lambda *args, **kwargs: list(self.reports)
 
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
-                patch("gradehelper.grader.write_results_atomic") as write_mock:
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
+                patch("gradehelper.stages.sen.write_results_atomic") as write_mock:
             grader._grade_with_llm_batch = lambda *args, **kwargs: self.fail(
                 "全已评分时不应调用 LLM")
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,

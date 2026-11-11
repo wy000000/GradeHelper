@@ -111,9 +111,9 @@ class TestDocWritesRuleComments(unittest.TestCase):
             result_name_format="{course}-{tagDep}-评分结果-{reportName}.xlsx",
         )))
 
-        with patch("gradehelper.grader.parse_all", return_value=[report]), \
-                patch("gradehelper.grader.read_rules", return_value=rules), \
-                patch("gradehelper.grader.run_program_rules",
+        with patch("gradehelper.stages.doc.parse_all", return_value=[report]), \
+                patch("gradehelper.stages.doc.read_rules", return_value=rules), \
+                patch("gradehelper.stages.doc.run_program_rules",
                       return_value=(scores, [])), \
                 patch.object(Grader, "_save_parsed", staticmethod(lambda reports: None)):
             grader.stage_doc(self.tmp, self.template, skip_images=0,
@@ -159,7 +159,7 @@ class TestSenKeepsRuleComments(unittest.TestCase):
                                comment="sen 阶段 LLM 评语")
         }
 
-        with patch("gradehelper.grader.read_rules", return_value=rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=rules):
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
 
@@ -180,7 +180,7 @@ class TestSenKeepsRuleComments(unittest.TestCase):
         grader = self._grader()
         grader._load_reports_for_pic = lambda *args, **kwargs: [report]
 
-        with patch("gradehelper.grader.read_rules", return_value=rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=rules):
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
 

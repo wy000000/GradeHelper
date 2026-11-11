@@ -108,9 +108,9 @@ class TestStageDocCleansMd(unittest.TestCase):
         scores = {"2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
                                                     comment="报告已提交，+25分")}}
 
-        with patch("gradehelper.grader.parse_all", return_value=[report]), \
-                patch("gradehelper.grader.read_rules", return_value=[rule]), \
-                patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
+        with patch("gradehelper.stages.doc.parse_all", return_value=[report]), \
+                patch("gradehelper.stages.doc.read_rules", return_value=[rule]), \
+                patch("gradehelper.stages.doc.run_program_rules", return_value=(scores, [])):
             grader = _grader()
             grader.stage_doc(self.tmp, self.template, skip_images=2,
                              output=self.result_path)
@@ -225,9 +225,9 @@ class TestStageDocRecordsParseWarnings(unittest.TestCase):
         scores = {"2021001": {"baseScore": ItemScore(key="baseScore", score=25.0,
                                                     comment="报告已提交，+25分")}}
         grader = _grader()
-        with patch("gradehelper.grader.parse_all", return_value=[report]), \
-                patch("gradehelper.grader.read_rules", return_value=[rule]), \
-                patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
+        with patch("gradehelper.stages.doc.parse_all", return_value=[report]), \
+                patch("gradehelper.stages.doc.read_rules", return_value=[rule]), \
+                patch("gradehelper.stages.doc.run_program_rules", return_value=(scores, [])):
             grader.stage_doc(self.tmp, self.template, skip_images=2,
                              output=self.result_path)
 
@@ -319,9 +319,9 @@ class TestStageDocOnlyCodeItems(unittest.TestCase):
 
     def _run_doc(self, report: ParsedReport, rules: list[RuleItem],
                  scores: dict[str, dict[str, ItemScore]]) -> None:
-        with patch("gradehelper.grader.parse_all", return_value=[report]), \
-                patch("gradehelper.grader.read_rules", return_value=rules), \
-                patch("gradehelper.grader.run_program_rules", return_value=(scores, [])):
+        with patch("gradehelper.stages.doc.parse_all", return_value=[report]), \
+                patch("gradehelper.stages.doc.read_rules", return_value=rules), \
+                patch("gradehelper.stages.doc.run_program_rules", return_value=(scores, [])):
             _grader().stage_doc(self.tmp, self.template, skip_images=0,
                                 output=self.result_path)
 

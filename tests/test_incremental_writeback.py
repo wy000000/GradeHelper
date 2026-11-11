@@ -139,8 +139,8 @@ class TestPicStageWritesBackPerBatch(unittest.TestCase):
                 flushes.append([item[0].student_id for item in batch])
             return done
 
-        with patch("gradehelper.grader.caption_images", fake_caption_images), \
-                patch("gradehelper.grader.read_rules", return_value=_rules()):
+        with patch("gradehelper.stages.pic.caption_images", fake_caption_images), \
+                patch("gradehelper.stages.pic.read_rules", return_value=_rules()):
             grader.stage_pic(self.tmp, self.template)
 
         self.assertEqual([len(item) for item in flushes], [2, 1])
@@ -204,9 +204,9 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
                 raise OSError("磁盘已满")
             return real_save_caption_txt(report, image, captions_dir)
 
-        with patch("gradehelper.grader.caption_images", self._fake_caption_images), \
-                patch("gradehelper.grader.save_caption_txt", fake_save), \
-                patch("gradehelper.grader.read_rules", return_value=_rules()), \
+        with patch("gradehelper.stages.pic.caption_images", self._fake_caption_images), \
+                patch("gradehelper.stages.pic.save_caption_txt", fake_save), \
+                patch("gradehelper.stages.pic.read_rules", return_value=_rules()), \
                 self.assertLogs("gradehelper.grader", level="ERROR") as logs:
             grader.stage_pic(self.tmp, self.template)
 
@@ -244,8 +244,8 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
 
         grader = Grader(_config(batch=2))
         grader._load_reports_for_pic = lambda *args, **kwargs: reports
-        with patch("gradehelper.grader.caption_images", self._fake_caption_images), \
-                patch("gradehelper.grader.read_rules", return_value=_rules()):
+        with patch("gradehelper.stages.pic.caption_images", self._fake_caption_images), \
+                patch("gradehelper.stages.pic.read_rules", return_value=_rules()):
             grader.stage_pic(self.tmp, self.template)
 
         # 同批另一份报告 md 正常写入
@@ -296,8 +296,8 @@ class TestSenCheckpointWriteback(unittest.TestCase):
             return real_write(output_path, reports, rules, scores, mode=mode,
                               claim=claim, **kwargs)
 
-        with patch("gradehelper.grader.write_results_atomic", _record), \
-                patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.write_results_atomic", _record), \
+                patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
@@ -326,7 +326,7 @@ class TestSenCheckpointWriteback(unittest.TestCase):
                                        comment="LLM 评语")}
 
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
                 self.assertLogs("gradehelper.grader", level="INFO") as logs:
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
@@ -385,7 +385,7 @@ class TestSenPreflight(unittest.TestCase):
         grader._log_path = self.tmp / "run.log"
         grader._load_reports_for_pic = lambda *args, **kwargs: list(reports)
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
@@ -418,8 +418,8 @@ class TestSenPreflight(unittest.TestCase):
 
         grader = Grader(_config(batch=2))
         grader._load_reports_for_pic = lambda *args, **kwargs: list(reports)
-        with patch("gradehelper.grader.read_rules", return_value=rules), \
-                patch("gradehelper.grader.write_results_atomic") as write_mock:
+        with patch("gradehelper.stages.sen.read_rules", return_value=rules), \
+                patch("gradehelper.stages.sen.write_results_atomic") as write_mock:
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
@@ -467,8 +467,8 @@ class TestSenCheckpointRetry(unittest.TestCase):
             return real_write(output_path, reports, rules, scores, mode=mode,
                               claim=claim, **kwargs)
 
-        with patch("gradehelper.grader.write_results_atomic", _flaky), \
-                patch("gradehelper.grader.read_rules", return_value=self.rules), \
+        with patch("gradehelper.stages.sen.write_results_atomic", _flaky), \
+                patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
                 self.assertLogs("gradehelper.grader", level="WARNING"):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)

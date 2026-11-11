@@ -266,7 +266,7 @@ class TestSenRetry(unittest.TestCase):
 
         grader = self._grader()
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
 
@@ -296,7 +296,7 @@ class TestSenRetry(unittest.TestCase):
 
         grader = self._grader(retry_rounds=2)  # 共 3 次尝试
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
 
@@ -320,7 +320,7 @@ class TestSenRetry(unittest.TestCase):
 
         grader = self._grader(retry_rounds=2)  # 共 3 次尝试
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules):
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
@@ -353,7 +353,7 @@ class TestSenRetry(unittest.TestCase):
         grader._grade_with_llm_batch = fake_grade
         log_path = self.tmp / "sen.log"
         grader._log_path = log_path
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
                 self.assertLogs(level="INFO") as captured:
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
@@ -394,8 +394,8 @@ class TestSenRetry(unittest.TestCase):
 
         grader = self._grader(retry_rounds=0)  # 只尝试 1 轮
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
-                patch("gradehelper.grader.write_results_atomic",
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
+                patch("gradehelper.stages.sen.write_results_atomic",
                       side_effect=RuntimeError("磁盘已满")), \
                 self.assertLogs("gradehelper.grader", level="ERROR") as logs, \
                 self.assertRaises(RuntimeError):
@@ -426,7 +426,7 @@ class TestSenRetry(unittest.TestCase):
 
         grader = self._grader(retry_rounds=2, batch=4)  # 共 3 次尝试
         grader._grade_with_llm_batch = fake_grade
-        with patch("gradehelper.grader.read_rules", return_value=self.rules), \
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules), \
                 patch("gradehelper.batch.ThreadPoolExecutor", RecordingPool):
             grader.stage_sen(self.tmp, self.template, output=self.result_path,
                              skip_images=0)
@@ -506,8 +506,8 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
 
         grader = self._grader(batch=4, retry_rounds=2)  # 共 3 轮
         grader._load_reports_for_pic = lambda *args, **kwargs: [report]
-        with patch("gradehelper.grader.caption_images", fake_caption_images), \
-                patch("gradehelper.grader.read_rules", return_value=self._rules()):
+        with patch("gradehelper.stages.pic.caption_images", fake_caption_images), \
+                patch("gradehelper.stages.pic.read_rules", return_value=self._rules()):
             grader.stage_pic(self.tmp, self.template)
 
         # 首轮 4；两次重试轮都用 2（按配置值只减半一次，不逐轮再减为 1）
