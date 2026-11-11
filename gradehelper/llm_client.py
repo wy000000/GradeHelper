@@ -37,6 +37,18 @@ class LLMTruncatedError(RuntimeError):
     """输出被截断（finish_reason == 'length'），重试无意义。"""
 
 
+class JsonParseError(ValueError):
+    """LLM 输出无法解析为 JSON 对象。
+
+    ``str(self)`` 只保留前后 200 字符，供主日志/控制台输出；
+    ``self.raw_text`` 保留完整原始文本，供独立详情日志使用。
+    """
+
+    def __init__(self, message: str, raw_text: str):
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
 class _StreamResult:
     """一次流式响应的累积结果。"""
 
@@ -526,11 +538,12 @@ def parse_json_object(text: str) -> dict:
                     break
                 pos = nxt
 
-    raise ValueError(
+    raise JsonParseError(
         f"无法从 LLM 输出中解析 JSON（长度={len(text)}）：\n"
         f"  前 200 字符: {text[:200]!r}\n"
         f"  后 200 字符: {text[-200:]!r}\n"
-        "提示：若末尾明显被截断，请检查 finish_reason / max_tokens（思考模式可能耗尽生成预算）"
+        "提示：若末尾明显被截断，请检查 finish_reason / max_tokens（思考模式可能耗尽生成预算）",
+        raw_text=text,
     )
 
 

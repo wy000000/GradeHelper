@@ -15,6 +15,36 @@ from .parser import parse_filename, scan_reports
 
 logger = logging.getLogger(__name__)
 
+
+# 单份报告处理失败（如 LLM 输出的 JSON 无法解析）时，把完整失败原因追加写入
+# 独立日志文件。文件：<项目根>/log/<报告文件名(不含扩展名)>.log
+_DETAIL_LOG_DIR = Path(__file__).resolve().parents[1] / "log"
+_DETAIL_LOG_LOCK = threading.Lock()
+
+
+def append_failure_detail(stage: str, report: ParsedReport, message: str) -> None:
+    """将单份报告处理失败的完整原因写入独立日志文件（pic / sen 阶段共用）。
+
+    文件名为 ``<报告文件名(不带扩展名)>.log``，放在项目根目录下的
+    ``log`` 文件夹中。文件夹不存在时自动创建；文件已存在则追加记录。
+    写失败只警告，不影响主流程。
+    """
+    try:
+        _DETAIL_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = _DETAIL_LOG_DIR / f"{Path(report.source_path).stem}.log"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        text = (
+            f"[{now}] 阶段={stage} 学号={report.student_id} 文件={report.source_path}\n"
+            f"{message}\n"
+            f"{'-' * 60}\n"
+        )
+        with _DETAIL_LOG_LOCK:
+            with log_file.open("a", encoding="utf-8") as fh:
+                fh.write(text)
+    except OSError as exc:
+        logger.warning("失败详情日志写入失败: %s", exc)
+
+
 # 日志记录的时间标记；清理时按该时间判断新旧（当前格式，不兼容旧日志）
 _RECORD_TIME_RE = re.compile(
     r"(?m)^记录时间:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$"
@@ -451,6 +481,12 @@ class RunLogMixin:
         for key, value in entry.extra.items():
             # 阶段开始已记录且值相同的配置项（如并发、跳过图片、base_url）不重复输出
             if self._stage_config_values.get(key) == value:
+                continue
+            if key == "失败文档":
+                docs = [d.strip() for d in str(value).split("、") if d.strip()]
+                lines.append("失败文档:")
+                for doc in docs:
+                    lines.append(f"  - {doc}")
                 continue
             lines.append(f"{key}: {value}")
         if entry.warnings:

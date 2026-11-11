@@ -41,7 +41,12 @@ from .result_paths import (
     resolve_result_path_hint,
 )
 from .rules_engine import run_program_rules
-from .run_log import RunLogMixin, StageLogEntry, format_duration
+from .run_log import (
+    RunLogMixin,
+    StageLogEntry,
+    append_failure_detail,
+    format_duration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -557,6 +562,13 @@ class Grader(RunLogMixin):
             caption_errors[(_report_key(report), image.index)] = reason
             _record_event("警告",
                           f"{report.base_name}-P{image.index}: 图片识别失败: {reason}")
+            # pic 阶段的 JSON 解析错误（JsonParseError 携带完整原文）同样写入附 log
+            raw = getattr(exc, "raw_text", None)
+            if raw:
+                append_failure_detail(
+                    "pic", report,
+                    f"{report.base_name}-P{image.index}: JSON 解析错误:"
+                    f"{reason}\n完整原文:\n{raw}")
 
         def _embed_and_save_md(report: ParsedReport) -> None:
             """把当前已识别的描述嵌入 md 并落盘（可重复调用，不会重复嵌入）。"""
@@ -1005,6 +1017,10 @@ class Grader(RunLogMixin):
                 "错误",
                 f"{label}: 评分失败（重试后仍失败，已跳过）: {failed.reason}",
                 count=False)
+            # 主 log/控制台只保留前后 200 字符（failed.reason，即 str(e)）；
+            # 独立日志保留完整内容（JsonParseError.raw_text，其它异常回退到 failed.reason）
+            detail = getattr(failed.error, "raw_text", None) or failed.reason
+            append_failure_detail("sen", report, detail)
 
         def _on_grade_retry(failed: FailedFile) -> None:
             """单份报告本次评分失败但还会重试：记入中间错误（每轮都保留）。"""
@@ -1345,7 +1361,8 @@ class Grader(RunLogMixin):
                 summary = (f"【阶段 sen】处理 {sen_total} 份文档：成功 {sen_success} 份，"
                            f"失败 {sen_failed} 份")
                 if failed_docs_text:
-                    summary += f"；失败文档：{failed_docs_text}"
+                    docs = [d.strip() for d in failed_docs_text.split("、") if d.strip()]
+                    summary += "；失败文档：\n" + "\n".join(f"  - {d}" for d in docs)
                 if sen_failed or error is not None:
                     logger.error("%s", summary)
                 else:

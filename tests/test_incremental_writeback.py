@@ -344,7 +344,7 @@ class TestSenCheckpointWriteback(unittest.TestCase):
         self.assertIn(doc_name, entry.title)
         console = "\n".join(logs.output)
         self.assertIn("处理 4 份文档：成功 3 份，失败 1 份", console)
-        self.assertIn(f"失败文档：{doc_name}", console)
+        self.assertIn(f"失败文档：\n  - {doc_name}", console)
 
 
 class TestSenPreflight(unittest.TestCase):

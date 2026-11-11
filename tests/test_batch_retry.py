@@ -378,11 +378,11 @@ class TestSenRetry(unittest.TestCase):
         self.assertNotIn("状态: 失败 - 始终失败", text)
         self.assertIn("中间错误: 1 条", text[summary_pos:])
         self.assertNotIn("  - 2021002.md: 第 1 次评分失败", text[summary_pos:])
-        self.assertIn("失败文档: 2021002.md", text[summary_pos:])
+        self.assertIn("失败文档:\n  - 2021002.md", text[summary_pos:])
         # 控制台最后输出与 log 相同的总结信息
         console = "\n".join(captured.output)
         self.assertIn("中间错误: 1 条", console)
-        self.assertIn("失败文档: 2021002.md", console)
+        self.assertIn("失败文档:\n  - 2021002.md", console)
 
     def test_console_summary_printed_when_stage_aborts(self):
         """阶段中途失败（如写表失败）时控制台仍输出份数与失败文档全名。"""
@@ -404,7 +404,7 @@ class TestSenRetry(unittest.TestCase):
 
         console = "\n".join(logs.output)
         self.assertIn("处理 3 份文档：成功 2 份，失败 1 份", console)
-        self.assertIn("失败文档：2021002.md", console)
+        self.assertIn("失败文档：\n  - 2021002.md", console)
 
     def test_retry_rounds_use_halved_llm_workers(self):
         """进入 retry_rounds 后 llm 并发按配置值减半，且不逐轮递归减半。"""
