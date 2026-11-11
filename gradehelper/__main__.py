@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage = "sen"
     # stage = "full"    
     incremental = False
-    # incremental = True
+    incremental = True
 
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；
