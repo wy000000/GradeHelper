@@ -256,13 +256,16 @@ def check_headers(tables: list[_Table]) -> list[str]:
 
 # ------------------------------------------------------------ 中位数合成
 
-def merge_median(tables: list[_Table]) -> list[_Row]:
+def merge_median(tables: list[_Table]) -> tuple[list[_Row], list[str]]:
     """按学号取总分中位数（median_high，偶数就高取），整行复制中位数所在行。
 
     前提：已通过 check_student_consistency 与 check_headers；tables 按 n 升序。
     输出行序 = 首个（n 最小）文件的行序；总分无法解析的样本已在读取时剔除。
+    返回 ``(合成行列表, 总分波动超 10% 的警告列表)``，警告项格式为
+    ``学号-姓名-班级``。波动判定：``(max-min)/|min| > 0.10``。
     """
     rows: list[_Row] = []
+    warnings: list[str] = []
     for sid, first_row in tables[0].rows.items():
         entries: list[tuple[float, _Row]] = []
         for t in tables:
@@ -273,10 +276,18 @@ def merge_median(tables: list[_Table]) -> list[_Row]:
             raise MedianError(
                 f"学号 {sid}-{first_row.std_name}-{first_row.klass} "
                 f"在所有文件中都无法解析总分，无法取中位数")
-        median = statistics.median_high([total for total, _row in entries])
+        totals = [total for total, _row in entries]
+        median = statistics.median_high(totals)
+        # 总分波动范围（相对最小值）超过 10% 则加入警告列表
+        if len(totals) >= 2:
+            lo = min(totals)
+            hi = max(totals)
+            span = hi - lo
+            if lo != 0 and span / abs(lo) > 0.10:
+                warnings.append(f"{sid}-{first_row.std_name}-{first_row.klass}")
         # tables 按 n 升序：median_high 返回真实存在的值，同分取 n 最小的文件
         rows.append(next(row for total, row in entries if total == median))
-    return rows
+    return rows, warnings
 
 
 # ------------------------------------------------------------ 输出写盘
@@ -401,10 +412,14 @@ def run_median(base: str, directory: str | Path | None = None,
         logger.info("学号一致性校验通过: %d 个文件，%d 名学生",
                     len(tables), len(tables[0].rows))
         headers = check_headers(tables)
-        rows = merge_median(tables)
+        rows, warnings = merge_median(tables)
+        if warnings:
+            for w in warnings:
+                logger.warning("总分波动超过 10%%: %s", w)
         write_median_result(out_path, headers, rows)
-        logger.info("median完成: %d 名学生，耗时 %.2fs，结果已写入 %s",
-                    len(rows), time.monotonic() - started, out_path)
+        logger.info("median完成: %d 名学生，总分波动超过 10%% 的学生 %d 名，"
+                    "耗时 %.2fs，结果已写入 %s",
+                    len(rows), len(warnings), time.monotonic() - started, out_path)
         return out_path
     except MedianError as exc:
         logger.error("%s", exc)  # 控制台与 median.log 双路输出

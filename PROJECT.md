@@ -61,7 +61,7 @@ python -m gradehelper --version   # 查看版本号
 | 流程控制 | `--stage STAGE` | `doc` / `pic` / `pic-e` / `sen` / `full` / `full-e` | `full` |
 | 流程控制 | `--incremental true\|false` | `true` / `false`（显式给出） | `false` |
 | 流程控制 | `--files NAME...` | 文件主名或完整名（逗号/空格分隔） | `None`（处理全部） |
-| 流程控制 | `--skip-images N` | 非负整数 | `2` |
+| 流程控制 | `--skip-images N` | 非负整数 | `0` |
 | 日志与诊断 | `-v, --verbose` | 开关 | 关闭（INFO 级别） |
 
 > 注：表中为**设计默认值**。当前 `gradehelper/__main__.py` 的 `build_parser()` 留有本地调试硬编码（`--reports`、`--template`、`--stage`、`--incremental` 等的实际默认值被临时修改），实际默认可能与表中不一致——请显式传参，勿依赖默认值。
@@ -128,7 +128,7 @@ python -m gradehelper --version   # 查看版本号
 - 增量判定标准不因指定模式改变：`doc` 看结果表 `result` 是否有该学号记录、`pic` 看 md 是否已有图片描述块、`sen` 看结果表该学号任一 LLM 项分数是否为空。名单只收窄处理范围，不改变“已完成”的判定依据。
 - `sen` 指定增量时，名单内文件若在结果表中完全没有行，记为错误并跳过（提示先执行 `doc` 阶段，写入运行日志与阶段总结），名单内其余文件继续评分；不会静默跳过，也不再整体报错退出。
 
-`--skip-images N`：解析时跳过每份报告的前 N 张图片（默认 2，通常用于跳过封面、评分表等与正文无关的图片）。
+`--skip-images N`：解析时跳过每份报告的前 N 张图片（默认 0，通常用于跳过封面、评分表等与正文无关的图片）。
 
 - 剩余图片保留文档中的原始编号参与识图与评分，不重排编号。
 - `N=0` 表示不跳过任何图片。

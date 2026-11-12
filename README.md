@@ -62,7 +62,7 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 | `--stage STAGE` | `doc` / `pic` / `pic-e` / `sen` / `full`（默认） / `full-e`；出错后可用 `--stage` 单独续跑某一步 |
 | `--incremental true\|false` | 增量模式，只处理未完成部分；**必须显式给出值**，默认 `false` |
 | `--files NAME...` | 只处理指定报告（文件主名或完整名，逗号/空格分隔） |
-| `--skip-images N` | 跳过每份报告前 N 张图片（默认 2，如封面、评分表），各阶段需传相同值 |
+| `--skip-images N` | 跳过每份报告前 N 张图片（默认 0，如封面、评分表），各阶段需传相同值 |
 | `-v, --verbose` | 控制台输出 DEBUG 级别日志 |
 | `--config PATH` | 指定配置文件，默认项目根目录 `config.yaml` |
 | `-h, --help` / `--version` | 查看参数帮助 / 版本号 |
@@ -100,7 +100,7 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 - **改动图片识别规则**：pic全量。
 - **改动LLM规则**：sen全量。
 - **stage-e**：谨慎使用，能节省图片二次识别时间，但误用会导致修改的作业不能正确更新图片描述。
-- 建议多次运行sen阶段，取平均值，避免随机因素。多次评分，如果有异常值，建议增加运行次数，去掉异常值；多份结果也可用下节 `median` 子命令按中位数合成。
+- 建议多次运行sen阶段，取平均值，避免随机因素。多次评分，如果有异常值，建议增加运行次数，去掉异常值；多份结果也可用下面 `median` 子命令按中位数合成。
 
 ## 多次评分取中位数（median 子命令）
 

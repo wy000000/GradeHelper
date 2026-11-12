@@ -44,8 +44,8 @@ def build_parser() -> argparse.ArgumentParser:
     reports_dir = str(Path.cwd())
     gradeTemplate_dir = None
 
-    reports_dir = "D:\AI\Reports"
-    gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
+    # reports_dir = "D:\AI\Reports"
+    # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
     # reports_dir = "D:\AI\Reports\课程报告"
     # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
@@ -53,11 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     # reports_dir = "D:\AI\Reports\实验报告"
     # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
 
-    skip_images = 2
-    stage = "doc"
-    stage = "pic"
-    stage = "pic-e"
-    stage = "sen"
+    skip_images = 0
+    # stage = "doc"
+    # stage = "pic"
+    # stage = "pic-e"
+    # stage = "sen"
     stage = "full"
     # stage = "full-e"
     incremental = False
@@ -101,8 +101,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="只更新指定的报告文件（主名或完整文件名，逗号/空格分隔，"
                              "对 doc/pic/pic-e/sen 三个阶段均有效）；省略=处理全部（默认）")
     ####################################################################
-
-
     # 可选子命令：median。不带子命令时解析行为与旧版完全一致（command=None）。
     subparsers = parser.add_subparsers(dest="command")
     median_parser = subparsers.add_parser(
@@ -114,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
                                help="原评分结果所在目录（默认当前工作目录）")
     median_parser.add_argument("--output", default=None,
                                help="输出 xlsx（默认 {主名称}-median.xlsx，与原文件同目录）")
+
+    # # TODO: 测试用——默认走 median 子命令分支；正式使用时删除此 set_defaults
+    # parser.set_defaults(command="median"
+    #                     # , base="云安全-系部专业-云安全课程报告-评分结果"
+    #                     , base="云安全-系部专业-实验报告：docker的安装配置与操作-评分结果"
+    #                     , dir=None
+    #                     # , output=None
+    #                     )
     return parser
 
 def main(argv: list[str] | None = None) -> int:
