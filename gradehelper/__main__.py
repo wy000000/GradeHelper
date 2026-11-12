@@ -45,19 +45,20 @@ def build_parser() -> argparse.ArgumentParser:
     gradeTemplate_dir = None
 
     reports_dir = "D:\AI\Reports"
+    gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
     # reports_dir = "D:\AI\Reports\课程报告"
     # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
-    reports_dir = "D:\AI\Reports\实验报告"
-    gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+    # reports_dir = "D:\AI\Reports\实验报告"
+    # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
 
     skip_images = 2
     stage = "doc"
-    # stage = "pic"
+    stage = "pic"
     stage = "pic-e"
     stage = "sen"
-    # stage = "full"
+    stage = "full"
     # stage = "full-e"
     incremental = False
     # incremental = True
