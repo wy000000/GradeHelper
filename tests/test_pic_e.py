@@ -78,7 +78,8 @@ class TestPicEStage(unittest.TestCase):
     @staticmethod
     def _fake_caption_images(sent: list[int]):
         """替身 vllm：记录被送去识别的图片编号，返回固定描述。"""
-        def fake(_reports, _cfg, _prompt, cancel=None, on_error=None, on_batch=None):
+        def fake(_reports, _cfg, _prompt, cancel=None, on_error=None, on_batch=None,
+                 **_kwargs):
             batch: list[tuple[ParsedReport, ReportImage]] = []
             for report in _reports:
                 for image in report.images:
@@ -214,10 +215,10 @@ class TestPicECli(unittest.TestCase):
             ["--stage", "pic-e", "--template", "template.xlsx"])
         self.assertEqual(args.stage, "pic-e")
 
-    def test_default_stage_is_full_e(self):
+    def test_default_stage_is_full(self):
         from gradehelper.__main__ import build_parser
         args = build_parser().parse_args(["--template", "template.xlsx"])
-        self.assertEqual(args.stage, "full-e")
+        self.assertEqual(args.stage, "full")
 
 
 class TestFullEDispatch(unittest.TestCase):

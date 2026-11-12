@@ -112,6 +112,7 @@ def run_file_batch(
     progress_enabled: bool = True,
     progress_stage: str | None = None,
     retry_workers: int | None = None,
+    progress_stall: float | None = None,
 ) -> BatchOutcome[R]:
     """多线程处理文件，失败入队并在整批结束后自动重试。
 
@@ -130,9 +131,11 @@ def run_file_batch(
     - ``max_attempts``：总尝试轮数，至少为 1；默认 2 表示失败后再重试一轮；
     - ``progress_stage``：进度条显示的阶段名；默认与 ``stage`` 相同。
       加载 md、LLM 评分等同一阶段内的多个批处理可借此区分，避免进度提示混淆。
-    - ``retry_workers``：重试轮（第 2 次及以后尝试）的并发线程数；``None`` 表示
+      - ``retry_workers``：重试轮（第 2 次及以后尝试）的并发线程数；``None`` 表示
       与首轮相同。``pic`` / ``sen`` 进入 ``retry_rounds`` 时传入 ``workers``
       减半后的值：配置值只减半一次，后续重试轮沿用同一值，不再递归减半（下限 1）。
+    - ``progress_stall``：在飞 LLM 请求的静默告警阈值（秒，通常传端点
+      ``read_timeout``），进度条据此对超阈值请求加 ``!`` 标记；0/None 表示不标记。
 
     返回成功结果（保持输入顺序）与最终异常队列。
     """
@@ -165,6 +168,7 @@ def run_file_batch(
             workers=round_workers, enabled=progress_enabled,
             retry_mode=attempt > 1,
             initial_failed=len(pending) if attempt > 1 else 0,
+            stall_seconds=progress_stall,
         )
         with progress:
             pool = ThreadPoolExecutor(max_workers=round_workers)

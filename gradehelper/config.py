@@ -50,8 +50,9 @@ class EndpointConfig:
     base_url: str = ""
     api_key: str = ""
     model: str = ""               # 模型名（也兼容旧配置的 api.model）
-    connect_timeout: int = 0      # TCP/TLS 连接超时（秒）
-    read_timeout: int = 0         # 等待响应数据的超时（秒）
+    connect_timeout: int = 0      # TCP/TLS 连接超时（秒）；0/未配置按 30 秒处理，不无限等待
+    read_timeout: int = 0         # 静默超时（秒）：连续无有效响应数据多久判失败；0 表示不限
+    request_timeout: int = 0      # 单请求总时长上限（秒）：无论是否持续有数据，超时即判失败；0 表示不限
     max_retries: int = 0
     llm_workers: int = 0   # sen 阶段 LLM 评分并发线程数；进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）
     vllm_workers: int = 0  # pic 阶段图片识别并发线程数；进入 retry_rounds 重试轮后按此值减半（只减一次，下限 1）

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gradehelper.config import AppConfig, PathsConfig  # noqa: E402
 from gradehelper.grader import Grader, StageLogEntry  # noqa: E402
 from gradehelper.models import ParsedReport  # noqa: E402
+from gradehelper import run_log as run_log_module  # noqa: E402
 from gradehelper.run_log import format_duration  # noqa: E402
 
 
@@ -726,6 +727,54 @@ class TestStageStartAndEvent(unittest.TestCase):
         )
         self.grader._append_stage_log(entry)
         self.assertIn("  - 未找到图片文件: P3.png", self._read())
+
+
+class TestFailureDetailLog(unittest.TestCase):
+    """附属详情日志：位置在主 log 所在目录的 log 子文件夹，每次失败追加。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.grader = Grader(AppConfig(paths=PathsConfig()))
+        self.grader._log_path = self.tmp / "云安全-计算机系-课程报告.log"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _detail_file(self) -> Path:
+        return self.tmp / "log" / "2021001.log"
+
+    def test_detail_log_written_next_to_main_log(self):
+        """附属日志写在主 log 同级的 log 子文件夹，内容含失败原因。"""
+        self.grader._append_failure_detail("sen", _report(), "第 1 次评分失败: 缺少评分项")
+        text = self._detail_file().read_text(encoding="utf-8")
+        self.assertIn("阶段=sen", text)
+        self.assertIn("学号=2021001", text)
+        self.assertIn("第 1 次评分失败: 缺少评分项", text)
+
+    def test_detail_log_appends_every_failure(self):
+        """每次失败都追加一条记录（带记录时间分隔），不去重、不覆盖。"""
+        self.grader._append_failure_detail("sen", _report(), "第 1 次评分失败: A")
+        self.grader._append_failure_detail("sen", _report(), "第 2 次评分失败: B")
+        text = self._detail_file().read_text(encoding="utf-8")
+        self.assertEqual(text.count("学号=2021001"), 2)
+        self.assertIn("第 1 次评分失败: A", text)
+        self.assertIn("第 2 次评分失败: B", text)
+
+    def test_detail_log_full_content_not_truncated(self):
+        """附属日志保存非截断的全部信息（完整 LLM 原始输出）。"""
+        raw = "很长的原始输出" * 500
+        self.grader._append_failure_detail(
+            "sen", _report(), f"第 1 次评分失败: 缺少评分项\n完整 LLM 原始输出:\n{raw}")
+        text = self._detail_file().read_text(encoding="utf-8")
+        self.assertIn(raw, text)
+
+    def test_detail_log_falls_back_when_no_main_log(self):
+        """主日志路径未知时回退到默认目录（conftest 已重定向到临时目录）。"""
+        grader = Grader(AppConfig(paths=PathsConfig()))  # 未设置 _log_path
+        grader._append_failure_detail("sen", _report(), "回退记录")
+        fallback = Path(run_log_module._DETAIL_LOG_DIR) / "2021001.log"
+        self.assertIn("回退记录", fallback.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

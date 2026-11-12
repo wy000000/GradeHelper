@@ -11,7 +11,7 @@ from ..excel_io import read_rules
 from ..image_caption import caption_images, load_caption_txt, save_caption_txt
 from ..models import ParsedReport, ReportImage
 from ..parser import embed_captions, has_image_caption
-from ..run_log import append_failure_detail, format_duration
+from ..run_log import format_duration
 from .common import _files_label, _run_mode_label, _select_reports, logger
 
 
@@ -129,7 +129,7 @@ class PicStageMixin:
             # pic 阶段的 JSON 解析错误（JsonParseError 携带完整原文）同样写入附 log
             raw = getattr(exc, "raw_text", None)
             if raw:
-                append_failure_detail(
+                self._append_failure_detail(
                     stage_name, report,
                     f"{report.base_name}-P{image.index}: JSON 解析错误:"
                     f"{reason}\n完整原文:\n{raw}")
@@ -175,7 +175,7 @@ class PicStageMixin:
             _save_md(report)
 
         def _on_caption_batch(items: list[tuple[ParsedReport, ReportImage]]) -> None:
-            """按 vllm_workers 实时回写：图片描述 txt + 涉及的 md，无需等整阶段结束。"""
+            """每完成一张图片立即回写：图片描述 txt + 涉及的 md，无需等整阶段结束。"""
             touched: dict[str, ParsedReport] = {}
             for report, image in items:
                 key = _report_key(report)
@@ -201,6 +201,25 @@ class PicStageMixin:
                 for image in report.images:
                     if image.caption:
                         caption_errors.pop((key, image.index), None)
+
+        def _doc_completed(report: ParsedReport) -> bool:
+            """报告是否已完整识别并回写 md（中断时据此把该文档计为成功）。
+
+            - 仍有缺描述的图片：视为未完成；
+            - md 回写失败：不计为完成（该文档计入失败）；
+            - 没有待处理图片（增量模式下已跳过，或本身无图片）：md 无需回写，
+              视为完成；其余要求 md 已成功回写（避免重复识别已完成的部分）。
+
+            中间出过错但已恢复的文档（错误已从异常队列清除）落入此类，计为成功。
+            """
+            if any(not image.caption for image in report.images):
+                return False
+            key = _report_key(report)
+            if key in md_errors:
+                return False
+            if not report.images:
+                return True
+            return key in saved_md_keys
 
         try:
             # 日志第一步：先记录配置信息（控制台同步输出），再加载与识图
@@ -319,13 +338,15 @@ class PicStageMixin:
                                 ("所有图片均已复用描述 txt，无需调用 vllm"
                                  if reuse_txt else "没有需要识别的图片"))
                 else:
-                    logger.info("【阶段 %s】vllm 批量识别图片（每 %d 张实时回写）",
-                                stage_name, max(1, cfg.vllm.vllm_workers))
+                    logger.info("【阶段 %s】vllm 批量识别图片（每张识别完成立即回写）",
+                                stage_name)
                     try:
                         caption_images(
                             pending_reports, cfg.vllm, cfg.prompts.image_prompt,
                             cancel=self.cancel_token, on_error=_on_caption_error,
                             on_batch=_on_caption_batch,
+                            progress_stage=stage_name,
+                            stall_seconds=cfg.vllm.read_timeout or None,
                         )
                     except BaseException:
                         # 先停掉在飞的生成，再保留已识别成功的描述
@@ -366,7 +387,11 @@ class PicStageMixin:
                                 caption_images(
                                     missing_reports, retry_vllm,
                                     cfg.prompts.image_prompt,
-                                    cancel=self.cancel_token, on_error=_on_caption_error,
+                                    cancel=self.cancel_token,
+                                    on_error=_on_caption_error,
+                                    on_batch=_on_caption_batch,
+                                    progress_stage=f"{stage_name}重试",
+                                    stall_seconds=cfg.vllm.read_timeout or None,
                                 )
                             except BaseException:
                                 self.cancel()
@@ -435,18 +460,44 @@ class PicStageMixin:
         finally:
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
+            # 中断分类（全部文档 = 成功 + 失败 + 未处理，三类互斥）：
+            # - 成功：已完整识别并回写 md（含中间出过错但已恢复的文档）；
+            # - 失败：出错且尚未成功（识别/txt/md 写盘仍在异常队列中），并入失败文档名单；
+            # - 未处理：无错误记录、但中断时尚未处理完成，单独计数、不并入失败。
+            # 分类只在中断时计算；正常完成走原有的回写失败统计。
+            interrupt_failed_names: list[str] = []
+            unprocessed_document_names: list[str] = []
+            doc_success = 0
             if error:
-                # 阶段中断：已加载但未完成整个阶段的文档都算失败
-                failed_in_reports = len(reports)
+                error_keys = set(_pending_keys())
+                for report in reports:
+                    name = Path(report.source_path).name
+                    if _report_key(report) in error_keys:
+                        # 出错且尚未成功：计入失败并登记名单（已失败的去重，不重复计）
+                        _record_failed_doc(name)
+                        if name not in interrupt_failed_names:
+                            interrupt_failed_names.append(name)
+                    elif _doc_completed(report):
+                        doc_success += 1  # 中断前已完整识别并回写 md
+                    elif name not in unprocessed_document_names:
+                        unprocessed_document_names.append(name)
+                # 中断时也按实际完成度刷新图片计数（正常路径在本区块结尾统计）
+                caption_done = sum(1 for report in reports
+                                   for image in report.images if image.caption)
+                saved_txt = len(saved_txt_keys)
+                # 中断失败的文档 = 出错且尚未成功的（未处理单独计数，不并入失败）
+                failed_in_reports = len(interrupt_failed_names)
             else:
                 # 正常完成：md 回写失败的文档算失败（图片识别/txt 失败只影响图片计数）
                 failed_in_reports = len(md_write_failed)
-            doc_success = len(reports) - failed_in_reports
+                doc_success = len(reports) - failed_in_reports
             doc_failed_total = load_failed + failed_in_reports
-            doc_total = doc_success + doc_failed_total
+            doc_unprocessed = len(unprocessed_document_names)
+            doc_total = doc_success + doc_failed_total + doc_unprocessed
             extra: dict[str, str] = {
                 "文档": (f"处理 {doc_total} 份 / 成功 {doc_success} 份 / "
-                         f"失败 {doc_failed_total} 份"),
+                         f"失败 {doc_failed_total} 份"
+                         + (f" / 未处理 {doc_unprocessed} 份" if doc_unprocessed else "")),
             }
             extra["base_url"] = cfg.vllm.base_url or "（未配置）"
             extra["model"] = str(cfg.vllm.get_model() or "（未配置）")
@@ -491,6 +542,24 @@ class PicStageMixin:
                                      f"（{skipped_caption_reports} 份报告）")
             if failed_documents:
                 extra["失败文档"] = "、".join(failed_documents)
+            if unprocessed_document_names:
+                extra["未处理文档"] = "、".join(unprocessed_document_names)
+            # 控制台汇总：成功/失败/未处理份数与失败/未处理文档全名（中断时也输出）；
+            # 与 sen 阶段一致：先一行汇总，随后追加各项名单，让控制台以总结收尾
+            if doc_total:
+                summary = (f"【阶段 {stage_name}】处理 {doc_total} 份文档："
+                           f"成功 {doc_success} 份，失败 {doc_failed_total} 份")
+                if doc_unprocessed:
+                    summary += f"，未处理 {doc_unprocessed} 份"
+                for list_name, names in (("失败文档", failed_documents),
+                                         ("未处理文档", unprocessed_document_names)):
+                    if names:
+                        summary += (f"；{list_name}：\n"
+                                    + "\n".join(f"  - {n}" for n in names))
+                if doc_failed_total or error is not None:
+                    logger.error("%s", summary)
+                else:
+                    logger.info("%s", summary)
             self._append_stage_log(self._build_stage_entry(
                 stage=stage_name,
                 reports=reports,
@@ -506,6 +575,7 @@ class PicStageMixin:
                 processed=total,
                 succeeded=success,
                 failed=failed,
+                unprocessed=doc_unprocessed,
                 unit=unit,
                 processed_note=processed_note,
                 # 中间错误已按时序写入日志，总结里只保留条数

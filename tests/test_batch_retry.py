@@ -18,6 +18,7 @@ from gradehelper.config import (  # noqa: E402
 )
 from gradehelper.excel_io import read_result_items, write_results  # noqa: E402
 from gradehelper.grader import Grader  # noqa: E402
+from gradehelper.llm_grading import LLMContentError  # noqa: E402
 from gradehelper.models import ItemScore, ParsedReport, ReportImage, RuleItem  # noqa: E402
 from gradehelper.parser import parse_all  # noqa: E402
 
@@ -406,6 +407,37 @@ class TestSenRetry(unittest.TestCase):
         self.assertIn("处理 3 份文档：成功 2 份，失败 1 份", console)
         self.assertIn("失败文档：\n  - 2021002.md", console)
 
+    def test_every_grade_failure_writes_detail_log(self):
+        """每次评分失败（含中间重试轮）都写附属日志：原因 + 完整 LLM 原始输出。"""
+        raw = '{"event": {"score": 80, "comment": "' + "评语" * 200 + '"}}'
+        message = ("LLM 返回的 JSON 不完整（可能被截断），缺少评分项: event")
+
+        def fake_grade(_client, report, _llm_rules):
+            if report.student_id == "2021002":
+                raise LLMContentError(message, raw_text=raw)
+            return {"event": ItemScore(key="event", score=12.0, confidence=0.9,
+                                       comment="LLM 评语")}
+
+        grader = self._grader(retry_rounds=1)  # 共 2 次尝试
+        grader._grade_with_llm_batch = fake_grade
+        grader._log_path = self.tmp / "sen.log"
+        with patch("gradehelper.stages.sen.read_rules", return_value=self.rules):
+            grader.stage_sen(self.tmp, self.template, output=self.result_path,
+                             skip_images=0)
+
+        detail = self.tmp / "log" / "2021002.log"
+        self.assertTrue(detail.is_file())
+        text = detail.read_text(encoding="utf-8")
+        # 中间失败（第 1 次）与最终失败（第 2 次）各写一条，不去重
+        self.assertIn("第 1 次评分失败", text)
+        self.assertIn("第 2 次评分失败", text)
+        self.assertEqual(text.count(message), 2)
+        # 每条都携带完整原始输出（非截断）
+        self.assertEqual(text.count(raw), 2)
+        # 主 log 不夹带完整原文（只保留简短原因）
+        main_text = (self.tmp / "sen.log").read_text(encoding="utf-8")
+        self.assertNotIn(raw, main_text)
+
     def test_retry_rounds_use_halved_llm_workers(self):
         """进入 retry_rounds 后 llm 并发按配置值减半，且不逐轮递归减半。"""
         pools: list[int] = []
@@ -489,7 +521,7 @@ class TestPicRetryHalvesBatch(unittest.TestCase):
         seen: list[int] = []
 
         def fake_caption_images(_reports, cfg, _prompt, *, cancel=None,
-                                on_error=None, on_batch=None):
+                                on_error=None, on_batch=None, **_kwargs):
             seen.append(cfg.vllm_workers)
             if len(seen) <= 2:  # 首轮与第 1 次重试都失败，触发下一轮重试
                 if on_error is not None:

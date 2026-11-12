@@ -16,7 +16,7 @@ from ..excel_io import (
 from ..file_claim import ResultFileClaim
 from ..llm_client import LLMClient
 from ..models import ItemScore, ParsedReport, RuleItem
-from ..run_log import append_failure_detail, format_duration
+from ..run_log import format_duration
 from .common import (
     _files_label, _report_needs_llm_grading, _run_mode_label, _select_reports,
     logger,
@@ -67,9 +67,10 @@ class SenStageMixin:
         claim: ResultFileClaim | None = None
         parse_workers = max(1, int(cfg.paths.parse_workers))
         max_attempts = 1 + max(0, int(cfg.paths.retry_rounds))
-        # 每完成 llm_workers 份报告就把已完成评分回写结果文件（中断也不丢已完成部分）
+        # 每完成一份报告就把已完成评分回写结果文件（有结果就回写，不分批）
         checkpoint_every = max(1, cfg.llm.llm_workers)
-        # 实时回写失败后的“冷却”位置：再多完成一批才重试，避免每批都卡在重试上
+        # 实时回写失败后的“冷却”位置：再完成约一批（checkpoint_every 份）才重试，
+        # 避免结果文件被占用时每完成一份都重复失败、刷警告
         checkpoint_retry_at = 0
         checkpoint_failures = 0
         # 无 LLM 评分项时分数不会变化，跳过结尾的冗余写表
@@ -128,6 +129,18 @@ class SenStageMixin:
                 path.name,
                 f"第 {attempt} 次加载失败: {str(exc) or exc.__class__.__name__}")
 
+        def _detail_message(failed: FailedFile) -> str:
+            """附属日志的完整内容：失败原因 + LLM 完整原始输出（非截断）。
+
+            主 log/控制台的 reason 只保留前后 200 字符（如 JsonParseError、
+            LLMContentError）；这里额外附上异常携带的完整原文（raw_text）。
+            """
+            message = (f"第 {failed.attempts} 次评分失败: {failed.reason}")
+            raw = getattr(failed.error, "raw_text", None)
+            if raw:
+                message += f"\n完整 LLM 原始输出:\n{raw}"
+            return message
+
         def _on_grade_failure(failed: FailedFile) -> None:
             """单份报告评分失败（重试后仍失败）：按时序写入错误信息，继续其它报告。"""
             nonlocal grade_failed, failed_report
@@ -142,10 +155,8 @@ class SenStageMixin:
                 "错误",
                 f"{label}: 评分失败（重试后仍失败，已跳过）: {failed.reason}",
                 count=False)
-            # 主 log/控制台只保留前后 200 字符（failed.reason，即 str(e)）；
-            # 独立日志保留完整内容（JsonParseError.raw_text，其它异常回退到 failed.reason）
-            detail = getattr(failed.error, "raw_text", None) or failed.reason
-            append_failure_detail("sen", report, detail)
+            # 附属日志保留完整内容（失败原因 + LLM 完整原始输出）；每次失败都写
+            self._append_failure_detail("sen", report, _detail_message(failed))
 
         def _on_grade_retry(failed: FailedFile) -> None:
             """单份报告本次评分失败但还会重试：记入中间错误（每轮都保留）。"""
@@ -153,6 +164,8 @@ class SenStageMixin:
             _mark_retrying(
                 _doc_name(report),
                 f"第 {failed.attempts} 次评分失败: {failed.reason}")
+            # 每次失败都写入附属日志：完整原因 + LLM 完整原始输出（不去重）
+            self._append_failure_detail("sen", report, _detail_message(failed))
 
         def _grade_one(
             report: ParsedReport,
@@ -328,7 +341,7 @@ class SenStageMixin:
                 client = LLMClient(cfg.llm, cancel=self.cancel_token)
 
                 def _on_graded(result: tuple[ParsedReport, dict[str, ItemScore]]) -> None:
-                    """单份报告评分成功：立即记入结果，并按批实时回写。"""
+                    """单份报告评分成功：立即记入结果并实时回写（不分批）。"""
                     nonlocal checkpoint_failures, checkpoint_retry_at
                     report, row = result
                     final_scores[report.student_id] = row
@@ -336,24 +349,26 @@ class SenStageMixin:
                     # 之前评分失败、重试成功的文档不再计入失败数
                     _mark_recovered(_doc_name(report))
                     logger.debug("【阶段 sen】已完成 ID %s", report.student_id)
-                    if (len(completed_reports) % checkpoint_every == 0
-                            and len(completed_reports) >= checkpoint_retry_at):
-                        # 实时回写：中断/崩溃时最多只丢最后不足一批的结果
+                    if len(completed_reports) >= checkpoint_retry_at:
+                        # 实时回写：每完成一份就写一次，中断/崩溃时不丢已完成的任何结果；
+                        # 成功不打 INFO（进度由进度条单行原地显示），失败告警保留
                         try:
                             write_results_atomic(
                                 result_path, completed_reports, rule_items,
-                                final_scores, mode="strict", claim=claim)
-                            logger.info("【阶段 sen】实时回写 %d/%d 份评分 → %s",
-                                        len(completed_reports), len(reports),
-                                        result_path)
+                                final_scores, mode="strict", claim=claim,
+                                announce=False)
+                            logger.debug("【阶段 sen】实时回写 %d/%d 份评分 → %s",
+                                         len(completed_reports), len(reports),
+                                         result_path)
                         except Exception as save_exc:  # noqa: BLE001 回写失败不终止评分
                             checkpoint_failures += 1
-                            # 冷却一批再试：一次瞬时占用不至于让整个阶段退化为只在结束时写
+                            # 冷却约一批的量再试：一次瞬时占用不至于退化为只在结束时写，
+                            # 也不至于每完成一份都重复失败
                             checkpoint_retry_at = len(completed_reports) + checkpoint_every
                             _record_event(
                                 "警告",
-                                f"实时回写失败（将在下一批后重试，结束时会再写一次）: "
-                                f"{save_exc}")
+                                f"实时回写失败（冷却 {checkpoint_every} 份后重试，"
+                                f"结束时会再写一次）: {save_exc}")
 
                 run_file_batch(
                     stage="sen",
@@ -370,6 +385,7 @@ class SenStageMixin:
                     on_failure=_on_grade_failure,
                     on_retry=_on_grade_retry,
                     max_attempts=max_attempts,
+                    progress_stall=cfg.llm.read_timeout or None,
                 )
                 if grade_failed:
                     logger.error("【阶段 sen】%d 份报告重试后仍评分失败，已跳过",
@@ -417,25 +433,39 @@ class SenStageMixin:
                 claim.release()  # 阶段结束（成功或失败）都必须释放独占句柄
             end_dt = datetime.now()
             elapsed = time.perf_counter() - t0
-            sen_failed = load_failed + grade_failed + missing_skipped
+            # 中断分类（全部文档 = 成功 + 失败 + 未处理，三类互斥）：
+            # - 成功：评分已完成（含中间出过错但重试已恢复的文档，此类已从 retrying 移除）；
+            # - 失败：出错且尚未成功（中断时仍在重试队列），并入失败文档名单；
+            # - 未处理：无错误记录、但中断时尚未完成评分，单独计数、不并入失败。
+            # 最终失败的文档已在「失败文档」名单里（并计入失败数），不重复登记。
+            interrupt_error_count = 0
+            sen_unprocessed_docs: list[str] = []
             if error:
-                # 阶段中断：未完成评分的报告算失败
-                unfinished = max(0, len(reports) - len(completed_reports) - grade_failed)
-                sen_failed += unfinished
+                for label in retrying:  # 出错且尚未成功；最终失败已从中移除
+                    if _record_failed(label):
+                        interrupt_error_count += 1
+                completed_labels = {_doc_name(report) for report in completed_reports}
+                for report in reports:
+                    name = _doc_name(report)
+                    if (name in completed_labels or name in failed_seen
+                            or name in sen_unprocessed_docs):
+                        continue  # 已成功 / 已计失败 / 已归类，不重复登记
+                    sen_unprocessed_docs.append(name)
+            sen_failed = (load_failed + grade_failed + missing_skipped
+                          + interrupt_error_count)
             sen_success = len(completed_reports)
-            sen_total = sen_success + sen_failed
-            sen_pending = max(0, sen_total - sen_success - sen_failed)
+            sen_unprocessed = len(sen_unprocessed_docs)
+            sen_total = sen_success + sen_failed + sen_unprocessed
             failed_docs_text = "、".join(failed_documents)
             extra: dict[str, str] = {
                 "报告": (f"处理 {sen_total} 份 / 成功 {sen_success} 份 / "
-                         f"失败 {sen_failed} 份"),
+                         f"失败 {sen_failed} 份"
+                         + (f" / 未处理 {sen_unprocessed} 份" if sen_unprocessed else "")),
                 "LLM 评分项": f"{llm_rule_count} 项",
                 "base_url": cfg.llm.base_url or "（未配置）",
                 "model": str(cfg.llm.get_model() or "（未配置）"),
                 "并发": f"{max(1, cfg.llm.llm_workers)} 线程",
             }
-            if sen_pending:
-                extra["未完成"] = f"{sen_pending} 份"
             if recovered:
                 extra["重试成功"] = f"{len(recovered)} 份（{'、'.join(recovered)}）"
             if rule_items:
@@ -449,6 +479,8 @@ class SenStageMixin:
                 extra["学号缺失"] = f"{missing_skipped} 份（不在 result 表，已跳过）"
             if failed_documents:
                 extra["失败文档"] = failed_docs_text
+            if sen_unprocessed_docs:
+                extra["未处理文档"] = "、".join(sen_unprocessed_docs)
             if result_path:
                 extra["结果文件"] = str(result_path)
             extra["跳过图片"] = f"前 {skip_images} 张"
@@ -475,19 +507,25 @@ class SenStageMixin:
                 processed=sen_total,
                 succeeded=sen_success,
                 failed=sen_failed,
+                unprocessed=sen_unprocessed,
                 unit="份",
                 # 中间错误已按时序写入日志，总结里只保留条数
                 list_warnings=False,
             )
 
-            # 控制台汇总：处理/成功/失败份数与失败文档全名（阶段中断时也输出已统计的部分）；
-            # 先输出一行汇总，随后输出与 log 完全相同的总结块，让控制台以总结收尾
+            # 控制台汇总：成功/失败/未处理份数与失败/未处理文档全名（阶段中断时也输出）；
+            # 先输出一行汇总，随后追加各项名单，让控制台以总结收尾
             if sen_total:
                 summary = (f"【阶段 sen】处理 {sen_total} 份文档：成功 {sen_success} 份，"
                            f"失败 {sen_failed} 份")
+                if sen_unprocessed:
+                    summary += f"，未处理 {sen_unprocessed} 份"
                 if failed_docs_text:
                     docs = [d.strip() for d in failed_docs_text.split("、") if d.strip()]
                     summary += "；失败文档：\n" + "\n".join(f"  - {d}" for d in docs)
+                if sen_unprocessed_docs:
+                    summary += ("；未处理文档：\n"
+                                + "\n".join(f"  - {d}" for d in sen_unprocessed_docs))
                 if sen_failed or error is not None:
                     logger.error("%s", summary)
                 else:

@@ -261,7 +261,8 @@ def write_results_atomic(output_path: str | Path,
                          mode: str = "upsert",
                          claim: ResultFileClaim | None = None,
                          retries: int = 6, retry_delay: float = 1.0,
-                         code_only: bool = False) -> Path:
+                         code_only: bool = False,
+                         announce: bool = True) -> Path:
     """写结果表：先写同目录临时文件再原子替换，目标被占用时重试且不损坏原文件。
 
     与 write_results 的区别只在落盘方式：内容先完整写到
@@ -272,6 +273,8 @@ def write_results_atomic(output_path: str | Path,
     保留在临时文件中，异常信息会给出该路径，关闭 Excel 后可改名取用或重新运行。
 
     code_only 语义见 build_results_workbook（doc 阶段只更新 code 项）。
+    ``announce=False`` 时成功后不打 INFO 日志（用于逐份实时回写，避免刷屏；
+    进度由进度条单行显示。写失败的 WARNING 不受影响）。
     """
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -305,5 +308,6 @@ def write_results_atomic(output_path: str | Path,
         raise RuntimeError(
             "结果文件无法写入（可能已被其它程序如 Excel 打开），请关闭后重试；" + hint
         ) from last_exc
-    logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
+    if announce:
+        logger.info("评分结果已写入 %s（%d 行，模式=%s）", out, len(reports), mode)
     return out

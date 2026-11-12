@@ -1,7 +1,8 @@
-"""LLM 评分结果完整性测试：截断/缺项必须视为失败。"""
+"""LLM 评分结果完整性测试：截断/缺项必须视为失败，错误携带完整原始输出。"""
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -9,19 +10,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.llm_client import parse_json_object  # noqa: E402
-from gradehelper.llm_grading import grade_with_llm_batch  # noqa: E402
+from gradehelper.llm_grading import LLMContentError, grade_with_llm_batch  # noqa: E402
 from gradehelper.models import ParsedReport, RuleItem  # noqa: E402
 
 
 class _FakeClient:
-    def __init__(self, data=None, error: Exception | None = None):
+    def __init__(self, data=None, error: Exception | None = None,
+                 text: str | None = None):
         self.data = data
         self.error = error
+        self.text = text
 
-    def chat_json(self, _messages, **_overrides):
+    def chat(self, _messages, **_overrides):
         if self.error is not None:
             raise self.error
-        return self.data
+        if self.text is not None:
+            return self.text
+        return json.dumps(self.data, ensure_ascii=False)
 
 
 def _rules() -> list[RuleItem]:
@@ -53,6 +58,28 @@ class TestGradeWithLlmBatch(unittest.TestCase):
             grade_with_llm_batch(client, _report(), _rules(), "prompt")
         self.assertIn("eventCause", str(ctx.exception))
         self.assertIn("不完整", str(ctx.exception))
+
+    def test_missing_items_error_carries_full_raw_text(self):
+        """缺少评分项的错误必须携带完整原始输出（附属日志据此保存非截断信息）。"""
+        raw = ('{"event": {"score": 80, "confidence": 0.9, "comment": "'
+               + "很长的评语" * 100 + '"}}')
+        client = _FakeClient(text=raw)
+        with self.assertRaises(LLMContentError) as ctx:
+            grade_with_llm_batch(client, _report(), _rules(), "prompt")
+        self.assertEqual(ctx.exception.raw_text, raw)  # 未截断
+        # 主日志用的 str() 仍是简短原因，不夹带原文
+        self.assertNotIn("很长的评语", str(ctx.exception))
+
+    def test_invalid_entries_error_carries_full_raw_text(self):
+        """某项不是对象 / score 缺失的错误同样携带完整原始输出。"""
+        raw = json.dumps({
+            "event": {"score": 80, "confidence": 0.9},
+            "eventCause": {"confidence": 0.8},  # score 缺失
+        }, ensure_ascii=False)
+        client = _FakeClient(text=raw)
+        with self.assertRaises(LLMContentError) as ctx:
+            grade_with_llm_batch(client, _report(), _rules(), "prompt")
+        self.assertEqual(ctx.exception.raw_text, raw)
 
     def test_json_parse_error_is_failure(self):
         client = _FakeClient(error=ValueError("无法从 LLM 输出中解析 JSON（截断）"))

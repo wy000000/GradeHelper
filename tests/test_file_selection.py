@@ -281,7 +281,8 @@ class TestPicSpecifiedFiles(unittest.TestCase):
 
     @staticmethod
     def _fake_caption_images(received: list[tuple[str, int]]):
-        def _fake(reports, _cfg, _prompt, cancel=None, on_error=None, on_batch=None):
+        def _fake(reports, _cfg, _prompt, cancel=None, on_error=None, on_batch=None,
+                  **_kwargs):
             for report in reports:
                 for image in report.images:
                     received.append((report.student_id, image.index))

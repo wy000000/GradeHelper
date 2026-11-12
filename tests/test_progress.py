@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import sys
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gradehelper.progress import (  # noqa: E402
     ParallelProgress, install_logging_bridge,
+)
+from gradehelper.request_track import (  # noqa: E402
+    REQUEST_REGISTRY, current_label, set_current_label,
 )
 
 
@@ -140,6 +144,69 @@ class TestParallelProgress(unittest.TestCase):
         out = stream.getvalue()
         self.assertIn("hello\n", out)
         self.assertIn("\r", out)  # 日志前清过进度行
+
+    # ------------------------------------------------------------------ 在飞请求显示
+
+    def test_inflight_request_display(self):
+        """进度行显示在飞最久请求的已用/静默时长，静默超阈值加 ``!``。"""
+        slot = REQUEST_REGISTRY.register("2021002-P3")
+        self.addCleanup(REQUEST_REGISTRY.unregister, slot)
+        slot.started = time.monotonic() - 65.0        # 已用 01:05
+        slot.progress_ts = time.monotonic() - 310.0   # 静默 05:10 > 300s 阈值
+
+        progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO(),
+                                    stall_seconds=300)
+        line = progress._line_text()
+        self.assertIn("最久 2021002-P3 已用 01:05 / 静默 !05:10", line)
+
+    def test_inflight_request_not_stalled_has_no_marker(self):
+        """静默未超阈值时不加 ``!`` 标记。"""
+        slot = REQUEST_REGISTRY.register("2021003-P1")
+        self.addCleanup(REQUEST_REGISTRY.unregister, slot)
+        slot.started = time.monotonic() - 10.0
+        slot.progress_ts = time.monotonic() - 2.0
+
+        progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO(),
+                                    stall_seconds=300)
+        line = progress._line_text()
+        self.assertIn("最久 2021003-P1 已用 00:10 / 静默 00:02", line)
+        self.assertNotIn("!", line)
+
+    def test_no_inflight_request_no_display(self):
+        """无在飞请求（如加载 md 阶段）时不显示请求用时段。"""
+        progress = ParallelProgress("sen", 2, unit="份", stream=io.StringIO(),
+                                    stall_seconds=300)
+        line = progress._line_text()
+        self.assertNotIn("最久", line)
+
+    def test_stall_disabled_when_no_threshold(self):
+        """未传 stall_seconds 时显示请求用时但不加标记。"""
+        slot = REQUEST_REGISTRY.register("2021004-P2")
+        self.addCleanup(REQUEST_REGISTRY.unregister, slot)
+        slot.started = time.monotonic() - 400.0
+        slot.progress_ts = time.monotonic() - 400.0
+
+        progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO())
+        line = progress._line_text()
+        self.assertIn("最久 2021004-P2 已用 06:40 / 静默 06:40", line)
+        self.assertNotIn("!", line)
+
+    def test_task_sets_and_restores_thread_label(self):
+        """任务进入时登记线程本地标签，退出（含异常）后恢复原值。"""
+        set_current_label("")
+        progress = ParallelProgress("sen", 1, unit="份", stream=io.StringIO())
+        with progress:
+            with progress.task("2021001.md"):
+                self.assertEqual(current_label(), "2021001.md")
+            self.assertEqual(current_label(), "")
+            set_current_label("outer")
+            try:
+                with self.assertRaises(RuntimeError):
+                    with progress.task("2021002.md"):
+                        raise RuntimeError("boom")
+                self.assertEqual(current_label(), "outer")
+            finally:
+                set_current_label("")
 
 
 if __name__ == "__main__":

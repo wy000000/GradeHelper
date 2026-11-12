@@ -139,7 +139,7 @@ class Grader(DocStageMixin, PicStageMixin, SenStageMixin, RunLogMixin):
         raise RuntimeError(message)
 
     def run(self, reports_dir: str | None = None, template: str | None = None,
-            output: str | None = None, stage: str = "full-e",
+            output: str | None = None, stage: str = "full",
             skip_images: int = 2, tag_dep: str = "系部专业",
             incremental: bool = False,
             files: list[str] | str | None = None) -> Path | None:

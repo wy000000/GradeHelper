@@ -25,12 +25,17 @@ from urllib.parse import urlsplit
 
 from .cancel import CancelToken, LLMAborted
 from .config import EndpointConfig
+from .request_track import REQUEST_REGISTRY, RequestSlot, current_label
 
 logger = logging.getLogger(__name__)
 
 # 撤销检查 / 静默超时检查的轮询间隔（秒）。Windows 上 close/shutdown 无法打断
 # 已阻塞的 recv，因此改用短超时轮询，保证 Ctrl+C 后亚秒级退出。
 _POLL_SECONDS = 0.25
+
+# connect_timeout 未配置（0/None）时的回退值（秒）。此前 0 表示无限等待，
+# 半开连接 / TLS 握手停滞时会让工作线程永久阻塞，阶段无法收尾。
+_DEFAULT_CONNECT_TIMEOUT = 30
 
 
 class LLMTruncatedError(RuntimeError):
@@ -171,8 +176,14 @@ class LLMClient:
 
         result = _StreamResult()
         silence = cfg.read_timeout or 0
+        request_timeout = float(cfg.request_timeout or 0)
         sock = self._open_socket(parts.scheme, host, port)
         handle = _AbortHandle(sock)
+        # 登记在飞请求：进度条据此显示「最久请求的已用/静默时长」；
+        # 静默基准 = 最近一次有效数据（心跳注释行不算），僵死连接无法续命；
+        # request_timeout 为单请求总时长上限（yaml 配置），无论是否持续有数据
+        slot = REQUEST_REGISTRY.register(current_label(),
+                                         request_timeout=request_timeout)
         try:
             # 关键：连接建立后立刻登记。即使服务端还没发响应头（排队/预处理中），
             # cancel() 也能关闭 socket。
@@ -182,19 +193,22 @@ class LLMClient:
                 self._send_request(sock, path, headers, body)
                 # 读取阶段用短超时，配合 select 轮询，保证撤销及时生效
                 sock.settimeout(_POLL_SECONDS)
-                status, reason, resp_headers, buf = self._read_headers(sock, silence)
+                status, reason, resp_headers, buf = self._read_headers(
+                    sock, silence, slot)
                 if status >= 400:
-                    text = self._read_error_body(sock, resp_headers, buf, silence)
+                    text = self._read_error_body(
+                        sock, resp_headers, buf, silence, slot)
                     reason = f" {reason}" if reason else ""
                     raise RuntimeError(
                         f"LLM 接口返回 HTTP {status}{reason}"
                         + (f": {text}" if text else "")
                     )
-                self._consume_body(sock, resp_headers, buf, result, silence)
+                self._consume_body(sock, resp_headers, buf, result, silence, slot)
             finally:
                 if self.cancel is not None:
                     self.cancel.unbind(handle)
         finally:
+            REQUEST_REGISTRY.unregister(slot)
             try:
                 sock.close()
             except OSError:
@@ -210,7 +224,8 @@ class LLMClient:
     # ------------------------------------------------------------------ HTTP 收发
 
     def _open_socket(self, scheme: str, host: str, port: int) -> socket.socket:
-        timeout = self.cfg.connect_timeout or None
+        # 0/未配置时按默认值处理，不无限等待（半开连接/握手停滞会永久挂起）
+        timeout = self.cfg.connect_timeout or _DEFAULT_CONNECT_TIMEOUT
         sock = socket.create_connection((host, port), timeout=timeout)
         if scheme == "https":
             ctx = ssl.create_default_context()
@@ -219,19 +234,35 @@ class LLMClient:
 
     def _send_request(self, sock: socket.socket, path: str, headers: dict[str, str],
                       body: bytes) -> None:
-        # 发送阶段用阻塞 socket（请求体很小，且连接已有超时）
-        sock.settimeout(self.cfg.connect_timeout or None)
+        # 发送阶段用阻塞 socket（请求体很小，连接已有超时；0/未配置回退默认值）
+        sock.settimeout(self.cfg.connect_timeout or _DEFAULT_CONNECT_TIMEOUT)
         lines = [f"POST {path} HTTP/1.1"]
         lines.extend(f"{k}: {v}" for k, v in headers.items())
         head = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1", "replace")
         sock.sendall(head + body)
 
     def _recv_some(self, sock: socket.socket, silence: int,
-                   last: float) -> tuple[bytes, float]:
-        """等待并读取一段数据；返回 (data, last)。data 为空表示对端关闭。"""
+                   slot: RequestSlot) -> bytes:
+        """等待并读取一段数据；data 为空表示对端关闭。
+
+        两个超时都在循环顶部检查，同时覆盖"select 报可读但 recv 持续
+        短超时"的边角：
+        - ``read_timeout``（静默）：基准取 ``slot.progress_ts``（最近一次
+          **有效数据**），而不是原始字节到达时间——SSE 心跳注释行 / 空行
+          不刷新该基准，无法再为僵死连接"续命"；
+        - ``request_timeout``（总上限）：基准取 ``slot.started``——无论
+          是否持续有数据，单请求总时长超限即失败。
+        """
         while True:
             if self.cancel is not None and self.cancel.is_set():
                 raise LLMAborted("调用已被取消")
+            now = time.monotonic()
+            if silence and now - slot.progress_ts > silence:
+                raise TimeoutError(f"LLM 超过 {silence}s 未返回有效数据")
+            if slot.request_timeout and now - slot.started > slot.request_timeout:
+                raise TimeoutError(
+                    f"LLM 请求总时长超过 {int(slot.request_timeout)}s"
+                    "（request_timeout，静默基准一直有数据也会触发）")
             # TLS 可能已在内部缓存了解密后的数据，此时 select 不会报可读。
             pending = 0
             if isinstance(sock, ssl.SSLSocket):
@@ -247,8 +278,6 @@ class LLMClient:
                         raise LLMAborted("调用已被取消") from exc
                     raise
                 if not readable:
-                    if silence and time.monotonic() - last > silence:
-                        raise TimeoutError(f"LLM 超过 {silence}s 未返回数据")
                     continue
             try:
                 data = sock.recv(65536)
@@ -259,17 +288,21 @@ class LLMClient:
                     raise LLMAborted("调用已被取消") from exc
                 raise
             if not data:
-                return b"", last
-            return data, time.monotonic()
+                return b""
+            return data
 
-    def _read_headers(self, sock: socket.socket, silence: int) -> tuple[int, str, dict, bytes]:
-        """读取响应头；返回 (status, reason, headers, 已读到的响应体前缀)。"""
+    def _read_headers(self, sock: socket.socket, silence: int,
+                      slot: RequestSlot) -> tuple[int, str, dict, bytes]:
+        """读取响应头；返回 (status, reason, headers, 已读到的响应体前缀)。
+
+        响应头属于服务端的真实响应（非心跳），每收到一段就刷新静默基准。
+        """
         buf = b""
-        last = time.monotonic()
         while b"\r\n\r\n" not in buf:
-            data, last = self._recv_some(sock, silence, last)
+            data = self._recv_some(sock, silence, slot)
             if not data:
                 raise ConnectionError("LLM 端点在返回响应头之前关闭了连接")
+            REQUEST_REGISTRY.touch(slot)
             buf += data
         head, _, rest = buf.partition(b"\r\n\r\n")
         lines = head.split(b"\r\n")
@@ -290,11 +323,10 @@ class LLMClient:
         return status, reason, headers, rest
 
     def _read_error_body(self, sock: socket.socket, headers: dict[str, str],
-                         buf: bytes, silence: int) -> str:
+                         buf: bytes, silence: int, slot: RequestSlot) -> str:
         """尽力读取错误响应体（最多 800 字节）用于报错。"""
         pieces = [buf]
         total = len(buf)
-        last = time.monotonic()
         chunked = "chunked" in headers.get("transfer-encoding", "").lower()
         remaining: int | None
         if chunked:
@@ -307,9 +339,10 @@ class LLMClient:
         else:
             remaining = None
         while total < 800 and (remaining is None or remaining > 0):
-            data, last = self._recv_some(sock, silence, last)
+            data = self._recv_some(sock, silence, slot)
             if not data:
                 break
+            REQUEST_REGISTRY.touch(slot)
             pieces.append(data)
             total += len(data)
             if remaining is not None:
@@ -319,47 +352,48 @@ class LLMClient:
     # ------------------------------------------------------------------ 响应体解码
 
     def _consume_body(self, sock: socket.socket, headers: dict[str, str], buf: bytes,
-                      result: _StreamResult, silence: int) -> None:
+                      result: _StreamResult, silence: int, slot: RequestSlot) -> None:
         parser = _SSEBuffer()
         transfer = headers.get("transfer-encoding", "").lower()
         if "chunked" in transfer:
-            self._consume_chunked(sock, buf, parser, result, silence)
+            self._consume_chunked(sock, buf, parser, result, silence, slot)
         elif "content-length" in headers:
             try:
                 remaining: int | None = int(headers["content-length"])
             except ValueError:
                 remaining = None
-            self._consume_counted(sock, buf, remaining, parser, result, silence)
+            self._consume_counted(sock, buf, remaining, parser, result, silence, slot)
         else:
-            self._consume_until_close(sock, buf, parser, result, silence)
+            self._consume_until_close(sock, buf, parser, result, silence, slot)
         for line in parser.flush():
-            self._handle_sse_line(line, result)
+            self._handle_sse_line(line, result, slot)
 
-    def _feed(self, parser: _SSEBuffer, data: bytes, result: _StreamResult) -> bool:
+    def _feed(self, parser: _SSEBuffer, data: bytes, result: _StreamResult,
+              slot: RequestSlot) -> bool:
         """把数据喂给 SSE 解析器；返回 True 表示收到 [DONE]。"""
         for line in parser.feed(data):
-            if self._handle_sse_line(line, result):
+            if self._handle_sse_line(line, result, slot):
                 return True
         return False
 
     def _consume_until_close(self, sock: socket.socket, buf: bytes, parser: _SSEBuffer,
-                             result: _StreamResult, silence: int) -> None:
-        if buf and self._feed(parser, buf, result):
+                             result: _StreamResult, silence: int,
+                             slot: RequestSlot) -> None:
+        if buf and self._feed(parser, buf, result, slot):
             return
-        last = time.monotonic()
         while True:
-            data, last = self._recv_some(sock, silence, last)
+            data = self._recv_some(sock, silence, slot)
             if not data:
                 return
-            if self._feed(parser, data, result):
+            if self._feed(parser, data, result, slot):
                 return
 
     def _consume_counted(self, sock: socket.socket, buf: bytes, remaining: int | None,
-                        parser: _SSEBuffer, result: _StreamResult, silence: int) -> None:
-        last = time.monotonic()
+                         parser: _SSEBuffer, result: _StreamResult, silence: int,
+                         slot: RequestSlot) -> None:
         while remaining is None or remaining > 0:
             if not buf:
-                data, last = self._recv_some(sock, silence, last)
+                data = self._recv_some(sock, silence, slot)
                 if not data:
                     return
                 buf = data
@@ -367,16 +401,16 @@ class LLMClient:
             piece, buf = buf[:take], buf[take:]
             if remaining is not None:
                 remaining -= take
-            if self._feed(parser, piece, result):
+            if self._feed(parser, piece, result, slot):
                 return
 
     def _consume_chunked(self, sock: socket.socket, buf: bytes, parser: _SSEBuffer,
-                         result: _StreamResult, silence: int) -> None:
-        last = time.monotonic()
+                         result: _StreamResult, silence: int,
+                         slot: RequestSlot) -> None:
         while True:
             # 读 chunk 大小行
             while b"\r\n" not in buf:
-                data, last = self._recv_some(sock, silence, last)
+                data = self._recv_some(sock, silence, slot)
                 if not data:
                     return
                 buf += data
@@ -390,22 +424,30 @@ class LLMClient:
                 return
             # 读满 size 字节数据 + 尾部 CRLF
             while len(buf) < size + 2:
-                data, last = self._recv_some(sock, silence, last)
+                data = self._recv_some(sock, silence, slot)
                 if not data:
                     return
                 buf += data
             piece = buf[:size]
             buf = buf[size + 2:]
-            if self._feed(parser, piece, result):
+            if self._feed(parser, piece, result, slot):
                 return
 
-    def _handle_sse_line(self, raw: bytes, result: _StreamResult) -> bool:
-        """处理一行 SSE；返回 True 表示收到 [DONE]，流结束。"""
+    def _handle_sse_line(self, raw: bytes, result: _StreamResult,
+                         slot: RequestSlot | None = None) -> bool:
+        """处理一行 SSE；返回 True 表示收到 [DONE]，流结束。
+
+        静默基准只由**有效数据行**刷新（``data:`` 帧或不带帧头的 JSON 行）；
+        空行与心跳注释（``: ping``）不算有效数据、不刷新——僵死连接
+        无法借心跳无限拖延。
+        """
         if self.cancel is not None and self.cancel.is_set():
             raise LLMAborted("调用已被取消")
         line = raw.decode("utf-8", "replace").strip()
         if not line or line.startswith(":"):
-            return False  # 空行 / SSE 注释（llama.cpp 的 ping）
+            return False  # 空行 / SSE 注释（llama.cpp 的 ping）：不算有效数据
+        if slot is not None and (line.startswith("data:") or line.startswith("{")):
+            REQUEST_REGISTRY.touch(slot)
         if line.startswith("data:"):
             data = line[5:].strip()
         elif line.startswith("{"):
@@ -494,15 +536,14 @@ class LLMClient:
 
 
 def parse_json_object(text: str) -> dict:
-    """从 LLM 输出中提取第一个可解析的 JSON 对象。
+    """从 LLM 输出中提取 JSON 对象。
 
-    LLM 可能在 JSON 前后夹带说明文字，且说明文字里也可能出现 ``{``。
-    因此不能只取第一个 ``{``：若第一个 ``{`` 开始的子串有匹配的闭合
-    ``}`` 但本身无法解析，会继续尝试后续的 ``{``。
+    【临时屏蔽】原先「判断首个 ``{`` 是否未闭合（截断）、再依次尝试从每个
+    ``{`` 开始截取子串解析」这两段花括号回退逻辑已注释停用；当前只尝试解析
+    整段文本（允许 ```json 代码块包裹）。
 
-    不过，若第一个 ``{`` 对应的对象本身就找不到闭合 ``}``
-    （``_find_json_end`` 返回 -1），说明最外层对象已被截断，直接报错，
-    不再回退到内部子对象，避免把截断的 JSON 误当成成功。
+    因此 JSON 前后夹带说明文字的输出会直接抛 ``JsonParseError``（解析出错的
+    提示与完整原文保留，不做屏蔽）。
     """
     text = text.strip()
     # 去掉 ```json ... ``` 包裹
@@ -517,26 +558,30 @@ def parse_json_object(text: str) -> dict:
     if result is not None:
         return result
 
-    start = text.find("{")
-    if start >= 0:
-        end = _find_json_end(text, start)
-        if end < 0:
-            # 最外层对象未闭合，JSON 被截断，不再尝试内部子对象
-            pass
-        else:
-            # 依次尝试从每个 '{' 开始的子串，第一个可解析的即返回
-            pos = start
-            while True:
-                end = _find_json_end(text, pos)
-                if end > pos:
-                    candidate = text[pos:end]
-                    result = _try_parse_one(candidate)
-                    if result is not None:
-                        return result
-                nxt = text.find("{", pos + 1)
-                if nxt < 0:
-                    break
-                pos = nxt
+    # 【临时屏蔽】花括号回退尝试（判断前后 {} 是否出错）：
+    #   1) 首个 '{' 未找到匹配 '}' 即视为截断，不再回退内部子对象；
+    #   2) 依次尝试从每个 '{' 开始的子串，第一个可解析的即返回。
+    # 只保留上面的整段文本解析；解析失败时仍抛 JsonParseError（提示不屏蔽）。
+    # start = text.find("{")
+    # if start >= 0:
+    #     end = _find_json_end(text, start)
+    #     if end < 0:
+    #         # 最外层对象未闭合，JSON 被截断，不再尝试内部子对象
+    #         pass
+    #     else:
+    #         # 依次尝试从每个 '{' 开始的子串，第一个可解析的即返回
+    #         pos = start
+    #         while True:
+    #             end = _find_json_end(text, pos)
+    #             if end > pos:
+    #                 candidate = text[pos:end]
+    #                 result = _try_parse_one(candidate)
+    #                 if result is not None:
+    #                     return result
+    #             nxt = text.find("{", pos + 1)
+    #             if nxt < 0:
+    #                 break
+    #             pos = nxt
 
     raise JsonParseError(
         f"无法从 LLM 输出中解析 JSON（长度={len(text)}）：\n"

@@ -16,22 +16,26 @@ from .parser import parse_filename, scan_reports
 logger = logging.getLogger(__name__)
 
 
-# 单份报告处理失败（如 LLM 输出的 JSON 无法解析）时，把完整失败原因追加写入
-# 独立日志文件。文件：<项目根>/log/<报告文件名(不含扩展名)>.log
+# 附属详情日志的回退目录：宿主未提供主日志路径时使用（如直接调用、测试）
+# 正常运行时由 RunLogMixin._append_failure_detail 解析为「主 log 所在目录/log」
 _DETAIL_LOG_DIR = Path(__file__).resolve().parents[1] / "log"
 _DETAIL_LOG_LOCK = threading.Lock()
 
 
-def append_failure_detail(stage: str, report: ParsedReport, message: str) -> None:
-    """将单份报告处理失败的完整原因写入独立日志文件（pic / sen 阶段共用）。
+def append_failure_detail(stage: str, report: ParsedReport, message: str,
+                          log_dir: str | Path | None = None) -> None:
+    """将单份报告处理失败的完整原因写入附属详情日志文件（pic / sen 阶段共用）。
 
-    文件名为 ``<报告文件名(不带扩展名)>.log``，放在项目根目录下的
-    ``log`` 文件夹中。文件夹不存在时自动创建；文件已存在则追加记录。
+    文件名为 ``<报告文件名(不带扩展名)>.log``，放在 ``log_dir`` 的 ``log``
+    子文件夹中；``log_dir`` 缺省时回退到项目根目录下的 ``log`` 文件夹。
+    文件夹不存在时自动创建；文件已存在则追加记录。
     写失败只警告，不影响主流程。
     """
     try:
-        _DETAIL_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = _DETAIL_LOG_DIR / f"{Path(report.source_path).stem}.log"
+        base = Path(log_dir) if log_dir is not None else _DETAIL_LOG_DIR
+        detail_dir = base if base.name == "log" else base / "log"
+        detail_dir.mkdir(parents=True, exist_ok=True)
+        log_file = detail_dir / f"{Path(report.source_path).stem}.log"
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         text = (
             f"[{now}] 阶段={stage} 学号={report.student_id} 文件={report.source_path}\n"
@@ -56,6 +60,8 @@ _RUN_START_RE = re.compile(
 )
 _SEP_EQ = "=" * 60
 _SEP_DASH = "-" * 60
+# 汇总中以「、」分隔、按名单逐行列出的项（失败/未处理文档的文件全名）
+_DOC_LIST_KEYS = frozenset({"失败文档", "未处理文档"})
 _LOG_TITLE = "GradeHelper \u8fd0\u884c\u65e5\u5fd7 Ver " + __version__
 
 
@@ -89,6 +95,7 @@ class StageLogEntry:
     end_student_id: str | None      # 结束学号（最后一份报告的学号）
     succeeded_count: int = 0        # 成功条数
     failed_count: int = 0           # 最终失败条数（同时用于状态判定）
+    unprocessed_count: int = 0      # 中断时未处理的条数（不计入失败；成功+失败+未处理=共处理）
     unit: str = "份"                # 计数单位
     processed_note: str = ""        # 合计行的构成说明（混合计数时用，如“文档 4 份 + 图片 41 张”）
     error: str | None = None        # 出错原因（若无则为 None）
@@ -363,6 +370,17 @@ class RunLogMixin:
         else:
             event_logger.warning("【阶段 %s】%s", stage, message)
 
+    def _append_failure_detail(self, stage: str, report: ParsedReport,
+                               message: str) -> None:
+        """把单份失败的完整信息写入附属详情日志（pic / sen 阶段共用入口）。
+
+        目录取主 log 所在目录的 ``log`` 子文件夹（与主日志放在一起，便于查找）；
+        主日志路径未知时回退到项目根目录下的 ``log`` 文件夹。
+        """
+        log_dir = (Path(self._log_path).parent
+                   if self._log_path is not None else None)
+        append_failure_detail(stage, report, message, log_dir=log_dir)
+
     def _build_stage_entry(self, *, stage: str, reports: list[ParsedReport],
                            tag_dep: str, start_dt: datetime, end_dt: datetime,
                            elapsed: float, error: str | None,
@@ -376,6 +394,7 @@ class RunLogMixin:
                            processed: int | None = None,
                            succeeded: int | None = None,
                            failed: int = 0,
+                           unprocessed: int = 0,
                            unit: str = "份",
                            processed_note: str = "",
                            list_warnings: bool = True) -> StageLogEntry:
@@ -401,6 +420,7 @@ class RunLogMixin:
             end_student_id=end_report.student_id if end_report else None,
             succeeded_count=ok,
             failed_count=failed,
+            unprocessed_count=unprocessed,
             unit=unit,
             processed_note=processed_note,
             error=error,
@@ -478,13 +498,16 @@ class RunLogMixin:
             lines.append(f"共处理: {entry.processed_count} {unit}{note}")
             lines.append(f"成功: {entry.succeeded_count} {unit}")
             lines.append(f"失败: {entry.failed_count} {unit}")
+            if entry.unprocessed_count:
+                # 中断时未处理的文档单列（不计入失败；成功+失败+未处理=共处理）
+                lines.append(f"未处理: {entry.unprocessed_count} {unit}")
         for key, value in entry.extra.items():
             # 阶段开始已记录且值相同的配置项（如并发、跳过图片、base_url）不重复输出
             if self._stage_config_values.get(key) == value:
                 continue
-            if key == "失败文档":
+            if key in _DOC_LIST_KEYS:
                 docs = [d.strip() for d in str(value).split("、") if d.strip()]
-                lines.append("失败文档:")
+                lines.append(f"{key}:")
                 for doc in docs:
                     lines.append(f"  - {doc}")
                 continue

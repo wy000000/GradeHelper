@@ -4,34 +4,52 @@ from __future__ import annotations
 
 import logging
 
-from .llm_client import LLMClient
+from .llm_client import LLMClient, parse_json_object
 from .models import ItemScore, ParsedReport, RuleItem
 
 logger = logging.getLogger(__name__)
+
+
+class LLMContentError(ValueError):
+    """LLM 返回的 JSON 数据不完整（能解析但缺项/字段无效）。
+
+    ``str(self)`` 只保留简短原因，供主日志/控制台输出；
+    ``self.raw_text`` 保留完整原始文本，供附属详情日志使用。
+    """
+
+    def __init__(self, message: str, raw_text: str = ""):
+        super().__init__(message)
+        self.raw_text = raw_text
 
 
 def grade_with_llm_batch(client: LLMClient, report: ParsedReport,
                          llm_rules: list[RuleItem], batch_prompt: str) -> dict[str, ItemScore]:
     """对单个文件的所有 LLM 评分项一次性提交，返回 {key: ItemScore}。
 
-    失败不自行捕获，异常向上抛出。client.chat_json 内部已按 cfg.max_retries
+    失败不自行捕获，异常向上抛出。client.chat 内部已按 cfg.max_retries
     重试，耗尽后会抛出 RuntimeError，由 stage_sen / main 决定退出程序。
 
     JSON 不完整（被截断）一律视为该文档**处理失败**：解析失败、缺少评分项、
     某一项不是对象、score 缺失或不是数字，都抛 ValueError 交给批处理入队重试，
     不做“取最低分”之类的静默兜底，避免失败文档被当成评分成功写进结果表。
+
+    解析失败抛 JsonParseError、数据不完整抛 LLMContentError：两者都携带
+    ``raw_text``（LLM 完整原始输出），附属详情日志据此保存非截断的全部信息。
     """
     items_text = build_llm_items_section(llm_rules)
     prompt = render_llm_batch_prompt(
         batch_prompt, items_text, report.md_text)
-    data = client.chat_json([{"role": "user", "content": prompt}])
+    text = client.chat([{"role": "user", "content": prompt}])
+    data = parse_json_object(text)
 
     if not isinstance(data, dict):
-        raise ValueError(f"LLM 返回的 JSON 不是对象: {type(data).__name__}")
+        raise LLMContentError(
+            f"LLM 返回的 JSON 不是对象: {type(data).__name__}", raw_text=text)
     missing = [rule.key for rule in llm_rules if rule.key not in data]
     if missing:
-        raise ValueError(
-            "LLM 返回的 JSON 不完整（可能被截断），缺少评分项: " + "、".join(missing))
+        raise LLMContentError(
+            "LLM 返回的 JSON 不完整（可能被截断），缺少评分项: " + "、".join(missing),
+            raw_text=text)
 
     result: dict[str, ItemScore] = {}
     invalid: list[str] = []
@@ -51,9 +69,10 @@ def grade_with_llm_batch(client: LLMClient, report: ParsedReport,
         logger.debug("  %s / %s -> score=%s confidence=%s (batch)",
                      report.student_id, rule.key, score, confidence)
     if invalid:
-        raise ValueError(
+        raise LLMContentError(
             "LLM 返回的 JSON 数据不完整（可能被截断），视为处理失败: "
-            + "、".join(invalid))
+            + "、".join(invalid),
+            raw_text=text)
     return result
 
 

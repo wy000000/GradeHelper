@@ -59,7 +59,7 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 | `--reports DIR` | 报告目录，默认当前工作目录 |
 | `--output XLSX` | 结果文件路径；缺省时按规则生成在模板同目录 |
 | `--tagDep NAME` | 系部专业标识，用于结果与日志文件名（默认 `系部专业`） |
-| `--stage STAGE` | `doc` / `pic` / `pic-e` / `sen` / `full` / `full-e`（默认）；出错后可用 `--stage` 单独续跑某一步 |
+| `--stage STAGE` | `doc` / `pic` / `pic-e` / `sen` / `full`（默认） / `full-e`；出错后可用 `--stage` 单独续跑某一步 |
 | `--incremental true\|false` | 增量模式，只处理未完成部分；**必须显式给出值**，默认 `false` |
 | `--files NAME...` | 只处理指定报告（文件主名或完整名，逗号/空格分隔） |
 | `--skip-images N` | 跳过每份报告前 N 张图片（默认 2，如封面、评分表），各阶段需传相同值 |
@@ -79,8 +79,8 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 | `pic` | 识别报告中的图片，把图片描述写回文档 |
 | `pic-e` | 先查找图片对应的描述 txt：有就直接写回文档，没有才调用 vllm 识别 |
 | `sen` | 用大模型对 LLM 评分项逐项评估，写入结果表 |
-| `full` | 依次执行 doc → pic → sen，一条命令跑完全部 |
-| `full-e` | 默认：依次执行 doc → pic-e → sen（图片阶段优先复用已有描述 txt） |
+| `full` | 默认：依次执行 doc → pic → sen，一条命令跑完全部 |
+| `full-e` | 依次执行 doc → pic-e → sen（图片阶段优先复用已有描述 txt） |
 
 程序包含四种运行模式（由 `--files` 与 `--incremental` 组合决定）：
 
@@ -100,14 +100,13 @@ python -m gradehelper --reports D:\AI\Reports --template 云安全-课程报告-
 - **改动图片识别规则**：pic全量。
 - **改动LLM规则**：sen全量。
 - **stage-e**：谨慎使用，能节省图片二次识别时间，但误用会导致修改的作业不能正确更新图片描述。
-
-
+- 建议多次运行sen阶段，取平均值，避免随机因素。多次评分，如果有异常值，建议增加运行次数，去掉异常值。
 
 ## 运行结果
 
 - **评分结果**：与模板同目录的 `...评分结果.xlsx`（`result` 表），总分为 Excel 加权公式 `=分项1*权重1+分项2*权重2+...`。
 - **运行日志**：与模板同目录的 `.log` 文件，记录运行配置、过程中的错误与阶段总结。
-- 中断（Ctrl+C）时，已完成的评分会保存。
+- 中断（Ctrl+C）时，已完成的评分/识别会保存；运行日志阶段总结按「全部 = 成功 + 失败 + 未处理」统计，并列出「失败文档」「未处理文档」的全名。
 
 ## 注意事项
 

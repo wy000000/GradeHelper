@@ -1,4 +1,4 @@
-"""实时回写测试：pic 按 vllm_workers 回写图片描述与 md，sen 按 llm_workers 回写结果表。"""
+"""实时回写测试：pic 每张图片回写描述与 md，sen 每份报告回写结果表。"""
 
 from __future__ import annotations
 
@@ -83,14 +83,14 @@ class TestCaptionBatchCallback(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_on_batch_called_every_vllm_workers_and_at_end(self):
+    def test_on_batch_called_per_image(self):
         reports = [_pic_report(self.tmp, sid) for sid in ("2021001", "2021002", "2021003")]
         batches: list[int] = []
         with patch("gradehelper.image_caption.LLMClient", _FakeClient):
             done = caption_images(reports, EndpointConfig(vllm_workers=2), "prompt",
                                   on_batch=lambda items: batches.append(len(items)))
         self.assertEqual(done, 3)
-        self.assertEqual(batches, [2, 1])  # 每 2 张一批 + 收尾不足一批
+        self.assertEqual(batches, [1, 1, 1])  # 每张识别完成立即回调，不分批
         self.assertEqual(reports[0].images[0].caption, "自动描述")
 
     def test_without_callback_still_captions(self):
@@ -101,7 +101,7 @@ class TestCaptionBatchCallback(unittest.TestCase):
 
 
 
-class TestPicStageWritesBackPerBatch(unittest.TestCase):
+class TestPicStageWritesBackPerImage(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
@@ -119,7 +119,7 @@ class TestPicStageWritesBackPerBatch(unittest.TestCase):
         md_seen_at_first_flush: list[str] = []
 
         def fake_caption_images(_reports, _cfg, _prompt, cancel=None, on_error=None,
-                                on_batch=None):
+                                on_batch=None, **_kwargs):
             batch: list[tuple[ParsedReport, ReportImage]] = []
             done = 0
             for report in _reports:
@@ -167,8 +167,8 @@ class TestPicWriteFailureRecorded(unittest.TestCase):
 
     @staticmethod
     def _fake_caption_images(_reports, _cfg, _prompt, cancel=None, on_error=None,
-                             on_batch=None):
-        """替身识图：每 2 张回调一次（与 caption_images 的 flush 行为一致）。"""
+                             on_batch=None, **_kwargs):
+        """替身识图：每 2 张回调一次（模拟旧版分批行为，验证阶段侧按列表回写）。"""
         batch: list[tuple[ParsedReport, ReportImage]] = []
         done = 0
         for report in _reports:
@@ -280,7 +280,7 @@ class TestSenCheckpointWriteback(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_sen_writes_back_every_llm_workers(self):
+    def test_sen_writes_back_every_report(self):
         grader = Grader(_config(batch=2))
         grader.config.llm.base_url = "http://llm.test"
         grader.config.llm.model = "llm-test"
@@ -301,8 +301,8 @@ class TestSenCheckpointWriteback(unittest.TestCase):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
-        # 2 份完成时回写、4 份完成时回写，最后汇总再写一次
-        self.assertEqual(recorded, [2, 4, 4])
+        # 每份完成时立即回写（1、2、3、4 份），最后汇总再写一次
+        self.assertEqual(recorded, [1, 2, 3, 4, 4])
         self.assertEqual(out, self.result_path)
         items = read_result_items(self.result_path)
         for report in self.reports:
@@ -431,7 +431,7 @@ class TestSenPreflight(unittest.TestCase):
 
 
 class TestSenCheckpointRetry(unittest.TestCase):
-    """实时回写失败不再永久放弃：冷却一批后继续尝试。"""
+    """实时回写失败不再永久放弃：冷却约一批的量后继续尝试。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -473,8 +473,9 @@ class TestSenCheckpointRetry(unittest.TestCase):
             out = grader.stage_sen(self.tmp, self.template, output=self.result_path,
                                    skip_images=0)
 
-        # 第一批（2 份）失败 → 冷却到第 4 份重试成功 → 阶段结束汇总再写一次
-        self.assertEqual(calls, [2, 4, 4])
+        # 第 1 份完成时回写失败 → 冷却 2 份（约一批的量）后第 3 份重试成功
+        # → 第 4 份回写 → 阶段结束汇总再写一次
+        self.assertEqual(calls, [1, 3, 4, 4])
         self.assertEqual(out, self.result_path)
         items = read_result_items(self.result_path)
         for report in self.reports:

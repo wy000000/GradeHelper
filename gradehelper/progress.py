@@ -4,6 +4,8 @@
 - 线程安全：计数与终端写入分别加锁，工作线程可随时上报；
 - 终端：单行 ``\\r`` 原地刷新，按显示宽度截断/补空格（兼容中文宽字符）；
 - 非终端（重定向到文件/IDE）：自动降级为周期性普通日志；
+- 在飞请求：显示最久 LLM/vllm 请求的已用/静默时长（静默达到
+  ``stall_seconds``（如端点 ``read_timeout``）时加 ``!`` 标记）；
 - 与 ``logging`` 协调：日志输出前先清掉进度行，避免日志和进度条串行；
 - 取消/异常：``close(aborted=True)`` 保证不会留下半行。
 
@@ -33,6 +35,7 @@ from contextlib import contextmanager
 from typing import Iterator, TextIO
 
 from .cancel import LLMAborted
+from .request_track import REQUEST_REGISTRY, current_label, set_current_label
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +98,16 @@ class ParallelProgress:
     def __init__(self, stage: str, total: int, *, unit: str = "项",
                  workers: int | None = None, stream: TextIO | None = None,
                  enabled: bool = True, retry_mode: bool = False,
-                 initial_failed: int = 0):
+                 initial_failed: int = 0,
+                 stall_seconds: float | None = None):
         """``retry_mode``：重试轮次，本轮任务都是之前已失败的文档。
 
         此时失败数先按 ``initial_failed`` 计入（即本轮待重试数量），
         同一文档再次失败不重复累计；重试成功后失败数减一。
+
+        ``stall_seconds``：在飞请求静默告警阈值（秒，通常传端点的
+        ``read_timeout``）。进度行显示在飞最久请求的已用/静默时长，
+        静默达到阈值时加 ``!`` 标记；0/None 表示不标记。
         """
         self.stage = stage
         self.total = max(0, int(total))
@@ -108,6 +116,7 @@ class ParallelProgress:
         self.stream = stream if stream is not None else sys.stderr
         self.enabled = bool(enabled and self.total > 0)
         self.retry_mode = bool(retry_mode)
+        self.stall_seconds = max(0.0, float(stall_seconds or 0))
 
         self._lock = threading.Lock()
         self._done = 0
@@ -182,8 +191,15 @@ class ParallelProgress:
 
     @contextmanager
     def task(self, label: str = "") -> Iterator[None]:
-        """包装一个并行任务：进入时 +进行中，退出时记完成/失败/中止。"""
+        """包装一个并行任务：进入时 +进行中，退出时记完成/失败/中止。
+
+        进入时把任务标签登记到线程本地（``request_track``）：同线程内
+        发起的 LLM 请求据此关联标签，进度条可显示在飞请求属于哪个任务。
+        """
         self._task_started(label)
+        previous = current_label()
+        if label:
+            set_current_label(label)
         try:
             yield
         except BaseException as exc:  # noqa: BLE001 含 KeyboardInterrupt
@@ -192,6 +208,8 @@ class ParallelProgress:
             raise
         else:
             self._task_finished(ok=True, aborted=False, label=label)
+        finally:
+            set_current_label(previous)
 
     def _task_started(self, label: str) -> None:
         with self._lock:
@@ -242,6 +260,22 @@ class ParallelProgress:
         rate = done / elapsed if elapsed > 0 else 0.0
         return done, failed, inflight, last, elapsed, rate
 
+    def _longest_request(self) -> tuple[str, float, float, bool] | None:
+        """在飞最久的 LLM 请求：(标签, 已用秒, 静默秒, 静默是否超阈值)。
+
+        静默 = 距该请求最近一次**有效数据**的时间（由 LLM 客户端在收到
+        内容增量时刷新，心跳不算），与端点配置 ``read_timeout`` 同口径；
+        无在飞请求时返回 None。
+        """
+        slot = REQUEST_REGISTRY.longest()
+        if slot is None:
+            return None
+        now = time.monotonic()
+        elapsed = max(0.0, now - slot.started)
+        silence = max(0.0, now - slot.progress_ts)
+        stalled = bool(self.stall_seconds and silence >= self.stall_seconds)
+        return slot.label, elapsed, silence, stalled
+
     def _line_text(self) -> str:
         done, failed, inflight, last, elapsed, rate = self._snapshot()
         pct = done / self.total * 100 if self.total else 100.0
@@ -260,6 +294,14 @@ class ParallelProgress:
         remaining = self.total - done
         if rate_valid and remaining > 0:
             parts.append(f"剩余 {_fmt_clock(remaining / rate)}")
+        longest = self._longest_request()
+        if longest:
+            label, req_elapsed, silence, stalled = longest
+            silence_text = _fmt_clock(silence)
+            if stalled:
+                silence_text = f"!{silence_text}"
+            parts.append(f"最久 {label} 已用 {_fmt_clock(req_elapsed)}"
+                         f" / 静默 {silence_text}")
         if last:
             parts.append(f"最近 {last}")
         return " | ".join(parts)

@@ -44,28 +44,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     reports_dir = "D:\AI\Reports"
 
-    # reports_dir = "D:\AI\Reports\课程报告"
-    # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
+    reports_dir = "D:\AI\Reports\课程报告"
+    gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
-    reports_dir = "D:\AI\Reports\实验报告"
-    gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+    # reports_dir = "D:\AI\Reports\实验报告"
+    # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
 
     skip_images = 2
     stage = "doc"
     # stage = "pic"
     stage = "pic-e"
     stage = "sen"
-    # stage = "full" 
+    # stage = "full"
     # stage = "full-e"
     incremental = False
     # incremental = True
 
+    files = None
+    # files = ["云安全-信息安全2301-3230604028-文志洁-云安全课程报告"
+    #         ,"云安全-信息安全2303-3230604061-杨镇泽-云安全课程报告"
+    #         ,"云安全-信息安全2503-3250708081-刘增-云安全课程报告"
+    #         ]
+
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；
     # 日志用「模式」记录：全部全量 / 全部增量 / 指定全量 / 指定增量。
-    # files = ["云安全-信息安全2201-3220601014-王庶尧-云安全课程报告"
-    #          ,"云安全-信息安全2301-3220802028-胡崎-云安全课程报告"]    
-    files = None
+
+
 
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
@@ -85,8 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
                         default=stage,
                         help="执行阶段：doc=解析+程序规则，pic=vllm图片识别，"
                              "pic-e=优先复用图片描述 txt（缺失的再交给 vllm），"
-                             "sen=llm语义评分，full=全部，"
-                             "full-e=全部（图片阶段使用 pic-e，默认）")
+                             "sen=llm语义评分，full=全部（默认），"
+                             "full-e=全部（图片阶段使用 pic-e）")
     parser.add_argument("--incremental", type=_parse_bool, default=incremental,
                         metavar="true|false",
                         help="增量模式：true=开启，false=关闭（默认 false）。"
