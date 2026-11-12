@@ -157,7 +157,7 @@ class TestParallelProgress(unittest.TestCase):
         progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO(),
                                     stall_seconds=300)
         line = progress._line_text()
-        self.assertIn("最久 2021002-P3 已用 01:05 / 静默 !05:10", line)
+        self.assertIn("最久已用 01:05 / 静默 !05:10 | 2021002-P3", line)
 
     def test_inflight_request_not_stalled_has_no_marker(self):
         """静默未超阈值时不加 ``!`` 标记。"""
@@ -169,7 +169,7 @@ class TestParallelProgress(unittest.TestCase):
         progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO(),
                                     stall_seconds=300)
         line = progress._line_text()
-        self.assertIn("最久 2021003-P1 已用 00:10 / 静默 00:02", line)
+        self.assertIn("最久已用 00:10 / 静默 00:02 | 2021003-P1", line)
         self.assertNotIn("!", line)
 
     def test_no_inflight_request_no_display(self):
@@ -188,8 +188,65 @@ class TestParallelProgress(unittest.TestCase):
 
         progress = ParallelProgress("pic", 4, unit="张", stream=io.StringIO())
         line = progress._line_text()
-        self.assertIn("最久 2021004-P2 已用 06:40 / 静默 06:40", line)
+        self.assertIn("最久已用 06:40 / 静默 06:40 | 2021004-P2", line)
         self.assertNotIn("!", line)
+
+    def test_tty_render_full_line_and_erase_block(self):
+        """TTY 渲染输出完整行（不截断，换行交给终端），并擦除旧行块不累积新行。"""
+        from unittest import mock
+        stream = _FakeTTY()
+        label = ("云安全-信息安全2301-3220802028-胡崎-"
+                 "实验报告：docker的安装配置与操作.md")
+        slot = REQUEST_REGISTRY.register(label)
+        self.addCleanup(REQUEST_REGISTRY.unregister, slot)
+        slot.started = time.monotonic() - 400.0
+        slot.progress_ts = time.monotonic() - 400.0
+
+        with mock.patch("gradehelper.progress._enable_ansi_stream",
+                        return_value=True):
+            progress = ParallelProgress("sen", 2, unit="份", stream=stream,
+                                        stall_seconds=120)
+            with progress:
+                with progress.task(label):
+                    pass
+        out = stream.getvalue()
+        # 完整行写入（未被截断到终端宽度）
+        self.assertIn("最久已用 06:40 / 静默 !06:40", out)
+        self.assertIn(label, out)
+        # 渲染前擦除旧行块（不追加新行）
+        self.assertIn("\x1b[J", out)
+
+    def test_elapsed_shows_used_and_remaining(self):
+        """阶段耗时显示「用时 已用/剩余」，完成速率显示为 s/份。"""
+        progress = ParallelProgress("sen", 4, unit="份", stream=io.StringIO())
+        # 无速率样本时：只显示已用，速率 0.0 s/份，不显示剩余
+        line = progress._line_text()
+        self.assertIn("用时 00:00", line)
+        self.assertIn("0.0 s/份", line)
+        used_seg = line.split("用时 00:00", 1)[1].split(" | ", 1)[0]
+        self.assertNotIn("/", used_seg)
+
+        # 模拟已运行 2 秒、完成 1 份：rate=0.5 份/s → 2.0 s/份，剩余 3/0.5=6 秒
+        progress._start = time.monotonic() - 2.0
+        progress._done = 1
+        line = progress._line_text()
+        self.assertIn("用时 00:02/00:06", line)
+        self.assertIn("2.0 s/份", line)
+
+    def test_long_label_keeps_times_visible(self):
+        """长文件名标签不挤掉时长：数值段前置于标签，渲染不截断。"""
+        label = ("云安全-信息安全2301-3220802028-胡崎-"
+                 "实验报告：docker的安装配置与操作.md")
+        slot = REQUEST_REGISTRY.register(label)
+        self.addCleanup(REQUEST_REGISTRY.unregister, slot)
+        slot.started = time.monotonic() - 400.0
+        slot.progress_ts = time.monotonic() - 400.0
+
+        progress = ParallelProgress("sen", 2, unit="份", stream=io.StringIO(),
+                                    stall_seconds=120)
+        line = progress._line_text()
+        self.assertIn("最久已用 06:40 / 静默 !06:40", line)
+        self.assertIn(label, line)
 
     def test_task_sets_and_restores_thread_label(self):
         """任务进入时登记线程本地标签，退出（含异常）后恢复原值。"""

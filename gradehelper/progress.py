@@ -2,10 +2,13 @@
 
 特性：
 - 线程安全：计数与终端写入分别加锁，工作线程可随时上报；
-- 终端：单行 ``\\r`` 原地刷新，按显示宽度截断/补空格（兼容中文宽字符）；
+- 终端：单行 ``\\r`` 原地刷新；支持 ANSI 时输出完整行（不截断），超宽由
+  终端自动换行，并在每次刷新前擦除上一次渲染的行块（不累积新行）；
+  不支持 ANSI 的环境回退为按显示宽度截断/补空格的单行；
 - 非终端（重定向到文件/IDE）：自动降级为周期性普通日志；
-- 在飞请求：显示最久 LLM/vllm 请求的已用/静默时长（静默达到
-  ``stall_seconds``（如端点 ``read_timeout``）时加 ``!`` 标记）；
+- 在飞请求：显示最久 LLM/vllm 请求的已用/静默时长（数值段固定前置于
+  标签）；静默达到 ``stall_seconds``（如端点 ``read_timeout``）时加
+  ``!`` 标记；
 - 与 ``logging`` 协调：日志输出前先清掉进度行，避免日志和进度条串行；
 - 取消/异常：``close(aborted=True)`` 保证不会留下半行。
 
@@ -126,6 +129,7 @@ class ParallelProgress:
         self._start = time.monotonic()
         self._last_log = self._start
         self._line_width = 0
+        self._line_rows = 0     # 上一次渲染在终端占用的行数（0=尚未渲染）
         self._closed = False
         self._started = False
 
@@ -133,6 +137,8 @@ class ParallelProgress:
             self._tty = bool(self.stream.isatty())
         except Exception:  # noqa: BLE001 无法判断时按非终端处理
             self._tty = False
+        # 能否用 ANSI/VT 序列做“整块擦除 + 完整行重绘”（Windows conhost 需开启）
+        self._ansi = self._tty and _enable_ansi_stream(self.stream)
 
         self._stop = threading.Event()
         self._ticker: threading.Thread | None = None
@@ -170,9 +176,9 @@ class ParallelProgress:
                 return
             summary = self._summary(aborted)
             if self._tty:
-                self._clear_locked()
+                # 不清除进度行，保留在屏幕上；新的信息在下一行显示
                 try:
-                    self.stream.write(summary + "\n")
+                    self.stream.write("\n" + summary + "\n")
                     self.stream.flush()
                 except (OSError, ValueError):  # 终端已关闭时忽略
                     pass
@@ -289,19 +295,25 @@ class ParallelProgress:
             f"失败 {failed}",
         ]
         if rate_valid:
-            parts.append(f"{rate:.1f} {self.unit}/s")
-        parts.append(f"已用 {_fmt_clock(elapsed)}")
+            # 显示每份所需秒数（s/份），而非每秒份数
+            parts.append(f"{1.0 / rate:.1f} s/{self.unit}")
+        else:
+            parts.append(f"0.0 s/{self.unit}")
+        # 阶段耗时：用时 已用/剩余（剩余按当前速率估算；无可用速率时只显示已用）
+        elapsed_text = f"用时 {_fmt_clock(elapsed)}"
         remaining = self.total - done
         if rate_valid and remaining > 0:
-            parts.append(f"剩余 {_fmt_clock(remaining / rate)}")
+            elapsed_text += f"/{_fmt_clock(remaining / rate)}"
+        parts.append(elapsed_text)
         longest = self._longest_request()
         if longest:
             label, req_elapsed, silence, stalled = longest
             silence_text = _fmt_clock(silence)
             if stalled:
                 silence_text = f"!{silence_text}"
-            parts.append(f"最久 {label} 已用 {_fmt_clock(req_elapsed)}"
-                         f" / 静默 {silence_text}")
+            # 数值段固定放在标签之前：标签再长也挤不掉时长与静默；标签前加 | 分隔
+            parts.append(f"最久已用 {_fmt_clock(req_elapsed)}"
+                         f" / 静默 {silence_text} | {label}")
         if last:
             parts.append(f"最近 {last}")
         return " | ".join(parts)
@@ -356,28 +368,54 @@ class ParallelProgress:
             logger.debug("进度刷新线程退出", exc_info=True)
 
     def _render_locked(self) -> None:
-        """写单行进度（调用方必须持有 CONSOLE_LOCK）。"""
+        """写整行进度（调用方必须持有 CONSOLE_LOCK）。
+
+        ANSI 可用时输出**完整行**（不截断，超宽由终端自动换行），并在渲染前
+        先上移光标擦除上一次渲染占用的整个行块，因此刷新既不丢信息也不累积
+        新行；不支持 ANSI 时回退为按显示宽度截断/补空格的单行刷新。
+        """
+        text = self._line_text()
         width = max(20, _terminal_width() - 1)
-        line = _fit_width(self._line_text(), width)
-        pad = max(0, self._line_width - _display_width(line))
         try:
+            if self._ansi:
+                disp = _display_width(text)
+                rows = max(1, (disp + width - 1) // width)
+                seq = ""
+                if self._line_rows > 1:
+                    seq += f"\x1b[{self._line_rows - 1}A"  # 上移到旧块首行
+                seq += "\r\x1b[J"  # 回行首并擦除旧块及下方残留
+                self.stream.write(seq + text)
+                self.stream.flush()
+                self._line_rows = rows
+                return
+            line = _fit_width(text, width)
+            pad = max(0, self._line_width - _display_width(line))
             self.stream.write("\r" + line + " " * pad)
             self.stream.flush()
+            self._line_width = _display_width(line)
         except (OSError, ValueError):  # 终端已关闭时忽略
             return
-        self._line_width = _display_width(line)
 
     def _clear_locked(self) -> None:
-        """清掉当前进度行（调用方必须持有 CONSOLE_LOCK）。"""
-        if not self._tty or self._line_width <= 0:
+        """清掉当前进度占用的整个行块（调用方必须持有 CONSOLE_LOCK）。"""
+        if not self._tty:
             return
         try:
-            self.stream.write("\r" + " " * self._line_width + "\r")
-            self.stream.flush()
+            if self._ansi:
+                seq = ""
+                if self._line_rows > 1:
+                    seq += f"\x1b[{self._line_rows - 1}A"
+                seq += "\r\x1b[J"
+                self.stream.write(seq)
+                self.stream.flush()
+            elif self._line_width > 0:
+                self.stream.write("\r" + " " * self._line_width + "\r")
+                self.stream.flush()
         except (OSError, ValueError):  # 终端已关闭时忽略
             pass
         finally:
             self._line_width = 0
+            self._line_rows = 0
 
 
 def _terminal_width() -> int:
@@ -385,6 +423,36 @@ def _terminal_width() -> int:
         return shutil.get_terminal_size((120, 24)).columns
     except Exception:  # noqa: BLE001 无法获取时用默认宽度
         return 120
+
+
+def _enable_ansi_stream(stream: TextIO) -> bool:
+    """返回 stream 所连终端是否（已）支持 ANSI/VT 序列。
+
+    POSIX 终端默认支持；Windows 控制台需通过 ``SetConsoleMode`` 开启
+    ``ENABLE_VIRTUAL_TERMINAL_PROCESSING``（VS Code / Windows Terminal
+    可直接开启，老版本 conhost 或非控制台流会失败并返回 False，
+    渲染随之回退为截断单行，避免旧行残留）。
+    """
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        fd = stream.fileno()
+        if fd not in (1, 2):
+            return False
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11 if fd == 1 else -12)
+        if not handle or handle == -1:  # 无控制台句柄或 INVALID_HANDLE_VALUE
+            return False
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        if not kernel32.SetConsoleMode(handle, mode.value | 0x0004):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 任何失败都按不支持 ANSI 处理
+        return False
 
 
 # ---------------------------------------------------------------------- 日志协调

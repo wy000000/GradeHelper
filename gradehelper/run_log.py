@@ -489,20 +489,61 @@ class RunLogMixin:
             if entry.end_student_id:
                 lines.append(f"\u7ed3\u675f\u5b66\u53f7: {entry.end_student_id}")
             lines.append(f"\u8fd0\u884c\u5f00\u59cb: {entry.start_time}")
-        lines.append(f"\u7ed3\u675f\u65f6\u95f4: {entry.end_time}")
-        lines.append(f"\u7528\u65f6: {format_duration(entry.duration_seconds)}")
+        lines.append(f"结束时间: {entry.end_time}")
+        lines.append(f"用时: {format_duration(entry.duration_seconds)}")
+
+        # 固定顺序先输出：LLM 评分项、规则项、共处理、中间错误、重试成功、成功、失败、未处理、报告
+        rendered_keys: set[str] = set()
+
+        def _render_extra(key: str) -> None:
+            if key not in entry.extra:
+                return
+            value = entry.extra[key]
+            # 阶段开始已记录且值相同的配置项（如并发、跳过图片、base_url）不重复输出
+            if self._stage_config_values.get(key) == value:
+                rendered_keys.add(key)
+                return
+            if key in _DOC_LIST_KEYS:
+                docs = [d.strip() for d in str(value).split("、") if d.strip()]
+                lines.append(f"{key}:")
+                for doc in docs:
+                    lines.append(f"  - {doc}")
+            else:
+                lines.append(f"{key}: {value}")
+            rendered_keys.add(key)
+
+        if "LLM 评分项" in entry.extra:
+            _render_extra("LLM 评分项")
+        if "规则项" in entry.extra:
+            _render_extra("规则项")
+
         if entry.processed_count:
             unit = entry.unit or "份"
             # 混合计数（如 pic 的文档+图片）时写明构成，避免合计与分项对不上
             note = f"（{entry.processed_note}）" if entry.processed_note else ""
             lines.append(f"共处理: {entry.processed_count} {unit}{note}")
+
+        if entry.warnings:
+            lines.append(f"中间错误: {len(entry.warnings)} 条")
+            if entry.list_warnings:
+                for warning in entry.warnings:
+                    lines.append(f"  - {warning}")
+
+        if "重试成功" in entry.extra:
+            _render_extra("重试成功")
+
+        if entry.processed_count:
+            unit = entry.unit or "份"
             lines.append(f"成功: {entry.succeeded_count} {unit}")
             lines.append(f"失败: {entry.failed_count} {unit}")
             if entry.unprocessed_count:
                 # 中断时未处理的文档单列（不计入失败；成功+失败+未处理=共处理）
                 lines.append(f"未处理: {entry.unprocessed_count} {unit}")
+
+        # 其余未在固定顺序里的 extra 项（按插入顺序，跳过已渲染项）
         for key, value in entry.extra.items():
-            # 阶段开始已记录且值相同的配置项（如并发、跳过图片、base_url）不重复输出
+            if key in rendered_keys:
+                continue
             if self._stage_config_values.get(key) == value:
                 continue
             if key in _DOC_LIST_KEYS:
@@ -510,13 +551,12 @@ class RunLogMixin:
                 lines.append(f"{key}:")
                 for doc in docs:
                     lines.append(f"  - {doc}")
-                continue
-            lines.append(f"{key}: {value}")
-        if entry.warnings:
-            lines.append(f"\u4e2d\u95f4\u9519\u8bef: {len(entry.warnings)} \u6761")
-            if entry.list_warnings:
-                for warning in entry.warnings:
-                    lines.append(f"  - {warning}")
+            else:
+                lines.append(f"{key}: {value}")
+
+        if "报告" in entry.extra:
+            _render_extra("报告")
+
         if entry.error:
             lines.append(f"状态: 失败 - {entry.error}")
         elif entry.failed_count:
@@ -525,7 +565,7 @@ class RunLogMixin:
             else:
                 lines.append(f"状态: 部分失败 - 失败 {entry.failed_count} 条")
         elif entry.warnings:
-            lines.append("状态: 成功（有警告）")
+            lines.append("状态: 成功（有警告，已成功处理）")
         else:
             lines.append("状态: 成功")
         lines.append(_SEP_EQ)

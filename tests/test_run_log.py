@@ -212,7 +212,7 @@ class TestAppendRunLog(unittest.TestCase):
         self.assertIn("中间错误: 2 条", text)
         self.assertIn("第 1 次解析失败，将重试: 临时错误", text)
         self.assertIn("未找到图片文件: P3.png", text)
-        self.assertIn("状态: 成功（有警告）", text)
+        self.assertIn("状态: 成功（有警告，已成功处理）", text)
 
     def test_run_header_and_stage(self):
         self.grader._append_run_header(

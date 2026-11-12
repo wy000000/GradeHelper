@@ -17,11 +17,13 @@ if __package__ in (None, ""):
     from gradehelper import __version__
     from gradehelper.config import load_config
     from gradehelper.grader import Grader
+    from gradehelper.median_merge import MedianError, run_median
     from gradehelper.progress import install_logging_bridge
 else:
     from . import __version__
     from .config import load_config
     from .grader import Grader
+    from .median_merge import MedianError, run_median
     from .progress import install_logging_bridge
 
 
@@ -44,11 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     reports_dir = "D:\AI\Reports"
 
-    reports_dir = "D:\AI\Reports\课程报告"
-    gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
+    # reports_dir = "D:\AI\Reports\课程报告"
+    # gradeTemplate_dir = "云安全-课程报告-评分模板.xlsx"
 
-    # reports_dir = "D:\AI\Reports\实验报告"
-    # gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
+    reports_dir = "D:\AI\Reports\实验报告"
+    gradeTemplate_dir = "云安全-docker实验报告-评分模板.xlsx"
 
     skip_images = 2
     stage = "doc"
@@ -61,16 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     # incremental = True
 
     files = None
-    # files = ["云安全-信息安全2301-3230604028-文志洁-云安全课程报告"
-    #         ,"云安全-信息安全2303-3230604061-杨镇泽-云安全课程报告"
-    #         ,"云安全-信息安全2503-3250708081-刘增-云安全课程报告"
+    # files = ["云安全-信息安全2302-3230604054-念欣怡-实验报告：docker的安装配置与操作"
+    #         ,"云安全-信息安全2502-3240110024-王警-实验报告：docker的安装配置与操作"
     #         ]
 
     # 只更新指定的报告文件（主名或完整文件名）；None 表示处理目录内全部文件。
     # 名单非空时，增量/全量只对名单内文件有效；
     # 日志用「模式」记录：全部全量 / 全部增量 / 指定全量 / 指定增量。
-
-
 
     parser.add_argument("--config", default=None, help="配置文件路径（默认项目根目录 config.yaml）")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}",
@@ -100,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--files", nargs="+", default=files, metavar="NAME",
                         help="只更新指定的报告文件（主名或完整文件名，逗号/空格分隔，"
                              "对 doc/pic/pic-e/sen 三个阶段均有效）；省略=处理全部（默认）")
+    ####################################################################
+
+
+    # 可选子命令：median。不带子命令时解析行为与旧版完全一致（command=None）。
+    subparsers = parser.add_subparsers(dest="command")
+    median_parser = subparsers.add_parser(
+        "median", help="多份评分结果按学号取总分中位数，合成新的评分结果")
+    median_parser.add_argument("base", metavar="主名称",
+                               help="原评分结果文件主名称（自动匹配 {主名称}-<n>.xlsx，"
+                                    "忽略不带 -n 的文件；可带 .xlsx 后缀）")
+    median_parser.add_argument("--dir", default=None,
+                               help="原评分结果所在目录（默认当前工作目录）")
+    median_parser.add_argument("--output", default=None,
+                               help="输出 xlsx（默认 {主名称}-median.xlsx，与原文件同目录）")
     return parser
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,6 +123,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     # 日志输出前先清掉进度行，避免并行进度与日志互相覆盖
     install_logging_bridge()
+
+    # median 子命令：不需要 config/模板/模型端点，先于评分流程分发
+    if getattr(args, "command", None) == "median":
+        try:
+            result = run_median(args.base, directory=args.dir, output=args.output)
+        except MedianError:
+            # 错误详情已由 run_median 输出到控制台与 {主名称}-median.log
+            return 1
+        except Exception as exc:  # noqa: BLE001 CLI 顶层统一报错
+            logging.error("median 处理失败: %s", exc)
+            return 1
+        print(f"median完成，结果已写入: {result}")
+        return 0
 
     config = load_config(args.config)
     grader = Grader(config)
