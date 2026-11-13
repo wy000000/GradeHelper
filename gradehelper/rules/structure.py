@@ -50,13 +50,22 @@ def use_template(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
     return penalty, rule.comment or f"报告未使用指定模板，{penalty:+g}分。"
 
 
+def _squash_whitespace(s: str) -> str:
+    """删除所有空白字符（半角/全角空格、制表符、换行等），容忍姓名中的空格。"""
+    return re.sub(r"\s+", "", s)
+
+
 def has_name_id(report: ParsedReport, rule: RuleItem) -> tuple[float, str]:
-    """报告文本中必须同时包含学号与姓名，缺任意一个按默认值扣分。"""
+    """报告文本中必须同时包含学号与姓名，缺任意一个按默认值扣分。
+
+    姓名匹配忽略空白：正文姓名中的空格（半角/全角/换行）不影响判定，
+    但姓名被其他文字隔开时仍视为缺失。
+    """
     text = report.md_text
     missing = []
     if report.student_id not in text:
         missing.append("学号")
-    if report.std_name not in text:
+    if _squash_whitespace(report.std_name) not in _squash_whitespace(text):
         missing.append("姓名")
     if not missing:
         return 0.0, "报告中包含姓名和学号，不扣分。"

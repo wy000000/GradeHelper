@@ -151,6 +151,29 @@ class TestStructureRules(unittest.TestCase):
         bad = make_report("没有学号姓名的报告")
         self.assertEqual(has_name_id(bad, rule)[0], -2.0)
 
+    def test_has_name_id_tolerates_spaces_in_name(self):
+        # 正文姓名可能被排版拉开空格（半角/全角/换行），不应误判缺失
+        rule = make_rule("hasNameID", "-2")
+        cases = (
+            "学号 2024001 姓名：张 三",       # 半角空格
+            "学号 2024001 姓名：张　三",      # 全角空格
+            "学号 2024001 姓名：张  三",      # 多个空格
+            "学号：2024001\n姓名：张\n三",    # 换行
+            "学号：2024001\n姓 名：张三",      # 标签本身带空格
+        )
+        for md in cases:
+            score, comment = has_name_id(make_report(md), rule)
+            self.assertEqual(score, 0.0, msg=md)
+            self.assertNotEqual(comment, rule.comment, msg=md)
+
+    def test_has_name_id_name_split_by_text_still_penalized(self):
+        # 姓名字符被其他文字隔开（非空白）仍算缺失
+        rule = make_rule("hasNameID", "-2")
+        md = "学号 2024001 姓名：张某某三"
+        score, comment = has_name_id(make_report(md, name="张三"), rule)
+        self.assertEqual(score, -2.0)
+        self.assertIn("姓名", comment)
+
     def test_redundant_rname(self):
         rule = make_rule("redundantRName", "-2")
         bad = make_report("云安全课程报告\n云安全实验报告\n张三\n正文")
